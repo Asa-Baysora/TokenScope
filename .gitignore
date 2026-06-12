@@ -1,0 +1,4 @@
+.build/
+TokenScope.app/
+AppIcon.iconset/
+.DS_Store
