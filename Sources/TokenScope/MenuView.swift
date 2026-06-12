@@ -40,12 +40,13 @@ struct MenuView: View {
     private var period: StatsPeriod { StatsPeriod(rawValue: periodRaw) ?? .today }
     private var activeTab: Tab { Tab(rawValue: activeTabRaw) ?? .now }
 
+    // Raw value stays "now" (persisted in AppStorage) though it's titled "Activity".
     enum Tab: String, CaseIterable, Identifiable {
         case now, usage, history, settings
         var id: String { rawValue }
         var title: String {
             switch self {
-            case .now: return "Now"
+            case .now: return "Activity"
             case .usage: return "Usage"
             case .history: return "History"
             case .settings: return "Settings"
@@ -61,12 +62,13 @@ struct MenuView: View {
         }
     }
 
+    // Limits is NOT here — it's an always-visible header (different scope/unit:
+    // account-wide %, not local token counts). These are the local-token sections.
     enum AppSection: String, CaseIterable, Identifiable {
-        case limits, live, latest, chart, providers, sessions, heatmap
+        case live, latest, chart, providers, sessions, heatmap
         var id: String { rawValue }
         var title: String {
             switch self {
-            case .limits: return "Limits"
             case .live: return "Live"
             case .latest: return "Latest calls"
             case .chart: return "Tokens over time"
@@ -82,6 +84,9 @@ struct MenuView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             titleBar.padding(.bottom, 8)
+            if activeTab != .settings {
+                limitsHeader.padding(.bottom, 10)
+            }
             tabBar.padding(.bottom, 10)
             content
             Divider().padding(.vertical, 8)
@@ -123,15 +128,31 @@ struct MenuView: View {
     // MARK: - Title bar & tabs
 
     private var titleBar: some View {
-        let t = store.totals(for: nil, in: .today)
+        let c = store.totals(for: .claude, in: .today)
+        let o = store.totals(for: .ollama, in: .today)
         return HStack(alignment: .firstTextBaseline, spacing: 8) {
             Text("TokenScope").font(.headline)
             Spacer()
-            Text("today  ↑ \(Fmt.compact(t.input))  ↓ \(Fmt.compact(t.output))")
-                .font(.system(size: 11))
-                .foregroundStyle(.secondary)
-                .monospacedDigit()
+            // Today's tokens split by provider — a single merged number is
+            // misleading (often dominated by free local Ollama traffic).
+            HStack(spacing: 7) {
+                Text("today").font(.system(size: 10)).foregroundStyle(.secondary)
+                if c.calls > 0 { providerTotalChip(.claude, c.input + c.output) }
+                if o.calls > 0 { providerTotalChip(.ollama, o.input + o.output) }
+                if c.calls == 0 && o.calls == 0 {
+                    Text("—").font(.system(size: 11)).foregroundStyle(.secondary)
+                }
+            }
+            .monospacedDigit()
         }
+    }
+
+    private func providerTotalChip(_ p: TokenProvider, _ total: Int) -> some View {
+        HStack(spacing: 3) {
+            Circle().fill(color(p)).frame(width: 6, height: 6)
+            Text(Fmt.compact(total)).font(.system(size: 11)).foregroundStyle(.secondary)
+        }
+        .help("\(p.displayName) tokens today (input + output)")
     }
 
     // Flat segmented control on top of the system glass popup: one subtle
@@ -220,48 +241,57 @@ struct MenuView: View {
 
     private var nowTab: some View {
         VStack(alignment: .leading, spacing: 14) {
-            section(.limits) { limitsContent }
             section(.live) { liveContent }
             section(.latest) { callsContent }
-            tabEmptyNote(.now, sections: [.limits, .live, .latest])
+            tabEmptyNote(.now, sections: [.live, .latest])
         }
     }
 
-    @ViewBuilder private var limitsContent: some View {
-        if !limits.connected {
-            Button { activeTabRaw = Tab.settings.rawValue; cookieDraft = "" } label: {
-                HStack(spacing: 6) {
-                    Image(systemName: "link").font(.system(size: 10))
-                    Text("Connect claude.ai to track session & weekly limits")
-                        .font(.system(size: 11.5))
-                }
-            }
-            .buttonStyle(.plain)
-            .foregroundStyle(.blue)
-        } else if let err = limits.errorMessage {
+    // MARK: - Limits header (always visible above the tabs)
+
+    /// claude.ai plan limits. Pulled out of the tabs because it's a different
+    /// scope and unit from everything else: account-wide utilization % (covers
+    /// claude.ai web + desktop + Claude Code), not local token counts. Always
+    /// on-screen since "how close to the wall" is the most actionable glance.
+    @ViewBuilder private var limitsHeader: some View {
+        VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
-                Image(systemName: "exclamationmark.triangle.fill")
-                    .font(.system(size: 10)).foregroundStyle(.orange)
-                Text(err).font(.system(size: 11)).foregroundStyle(.secondary)
+                Text("CLAUDE.AI LIMITS")
+                    .font(.system(size: 10, weight: .semibold)).foregroundStyle(.secondary)
+                Text("whole account · web + desktop + Code")
+                    .font(.system(size: 9.5)).foregroundStyle(.tertiary)
+                Spacer()
+                if limits.connected, !limits.windows.isEmpty { refreshButton }
             }
-        } else if limits.windows.isEmpty {
-            HStack(spacing: 6) {
-                Text("Loading limits…").font(.system(size: 11)).foregroundStyle(.secondary)
-                refreshButton
-            }
-        } else {
-            VStack(alignment: .leading, spacing: 7) {
-                ForEach(limits.windows) { w in limitRow(w) }
-                HStack(spacing: 6) {
-                    if let when = limits.lastUpdated {
-                        Text("updated \(Fmt.time.string(from: when))")
-                            .font(.system(size: 9.5)).foregroundStyle(.secondary)
+            if !limits.connected {
+                Button { activeTabRaw = Tab.settings.rawValue; cookieDraft = "" } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "link").font(.system(size: 10))
+                        Text("Connect claude.ai to track session & weekly limits")
+                            .font(.system(size: 11.5))
                     }
-                    refreshButton
-                    Spacer()
                 }
+                .buttonStyle(.plain)
+                .foregroundStyle(.blue)
+            } else if let err = limits.errorMessage, limits.windows.isEmpty {
+                HStack(spacing: 6) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 10)).foregroundStyle(.orange)
+                    Text(err).font(.system(size: 11)).foregroundStyle(.secondary)
+                    refreshButton
+                }
+            } else if limits.windows.isEmpty {
+                HStack(spacing: 6) {
+                    Text("Loading limits…").font(.system(size: 11)).foregroundStyle(.secondary)
+                    refreshButton
+                }
+            } else {
+                ForEach(limits.windows) { w in limitRow(w) }
             }
         }
+        .padding(11)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .sectionCard(cornerRadius: 13)
     }
 
     private var refreshButton: some View {
@@ -356,7 +386,7 @@ struct MenuView: View {
     // MARK: - Usage tab
 
     private var usageTab: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: 12) {
             HStack {
                 Picker("", selection: $periodRaw) {
                     ForEach(StatsPeriod.allCases) { p in Text(p.label).tag(p.rawValue) }
@@ -366,6 +396,9 @@ struct MenuView: View {
                 .controlSize(.small)
                 Spacer()
             }
+            Text("Token counts from Claude Code + Ollama on this Mac (excludes claude.ai web & desktop).")
+                .font(.system(size: 9.5)).foregroundStyle(.tertiary)
+                .fixedSize(horizontal: false, vertical: true)
             section(.chart) { chartBlock }
             section(.providers) {
                 VStack(alignment: .leading, spacing: 8) {
@@ -724,7 +757,7 @@ struct MenuView: View {
 
     private func tabFor(_ s: AppSection) -> Tab {
         switch s {
-        case .limits, .live, .latest: return .now
+        case .live, .latest: return .now
         case .chart, .providers, .sessions: return .usage
         case .heatmap: return .history
         }

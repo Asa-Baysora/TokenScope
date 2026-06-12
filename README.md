@@ -71,21 +71,25 @@ ollama run gemma4:12b-mlx
 
 ## Reading the menu
 
-Four tabs. Within any tab, click a section's title to collapse it; in **Settings**
-you can hide sections entirely.
+The window separates the two things it measures by **scope**:
 
-- **Now** — *Limits*: your claude.ai session (5h) and weekly (7d) utilization as
-  color-coded bars (green < 70%, yellow < 90%, red ≥ 90%) with reset countdowns,
-  or a "Connect claude.ai" prompt if no cookie is set. *Live*: in-flight calls
-  with a growing output counter (proxy streams update live; Anthropic-format
-  streams count chunks until the exact total lands at message end), plus the
-  Ollama model resident in memory and its VRAM. *Latest calls*: the 8 most recent
-  (time, provider dot, model, `↑ input (+cache read) ↓ output`), not period-scoped.
-- **Usage** — obeys the Today / 7 Days / 30 Days picker: the bar chart (per **hour**
-  for Today, per **day** otherwise; future slots blank) with a Stacked ↔ Grouped
-  toggle and "Hide weekends" filter and a dashed kernel-regression trendline;
-  provider totals with per-model breakdown; sessions (green dot = active in the
-  last 15 min; named with Claude Code's own `/resume` titles).
+- **claude.ai limits** (always-visible header) — your session (5h) and weekly (7d)
+  utilization as color-coded bars (green < 70%, gradient to yellow by 80%, to red
+  by 90%) with reset countdowns and a refresh button, or a "Connect claude.ai"
+  prompt if no cookie is set. Labeled *whole account* because it covers claude.ai
+  web + desktop + Claude Code (but not Ollama). A click away in the four tabs is
+  everything denominated in **local tokens** (Claude Code + Ollama on this Mac):
+
+- **Activity** — *Live*: in-flight calls with a growing output counter (proxy
+  streams update live; Anthropic-format streams count chunks until the exact total
+  lands at message end), plus the Ollama model resident in memory and its VRAM.
+  *Latest calls*: the 8 most recent (time, provider dot, model,
+  `↑ input (+cache read) ↓ output`), not period-scoped.
+- **Usage** — obeys the Today / 7 Days / 30 Days picker (with a source caption):
+  the bar chart (per **hour** for Today, per **day** otherwise; future slots blank)
+  with a Stacked ↔ Grouped toggle, "Hide weekends" filter, and a dashed kernel-
+  regression trendline; provider totals with per-model breakdown; sessions (green
+  dot = active in the last 15 min; named with Claude Code's own `/resume` titles).
 - **History** — GitHub-style 6-month heatmap with month labels. Cell hue mixes the
   provider colors by that day's share (orange = all Claude, blue = all Ollama);
   opacity carries the day's volume. Days that age out of the 31-day live window
@@ -94,6 +98,9 @@ you can hide sections entirely.
 - **Settings** — paste your claude.ai Cookie header; choose what the **menu bar
   shows** (any of session limit %, weekly limit %, daily token count); toggle
   limit/status notifications; and show/hide any section.
+
+The title-bar headline shows today's tokens split by provider (orange Claude /
+blue Ollama) rather than one merged total.
 
 The **footer** (always visible) shows Anthropic service status on the left and the
 proxy on the right. The **menu bar gauge** tints green/yellow/red to your nearest

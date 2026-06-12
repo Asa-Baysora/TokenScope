@@ -112,26 +112,39 @@ identifier so the bare `--snapshot` binary doesn't raise an NSException).
 
 ## UI (MenuView)
 
-A custom (snapshot-renderable) **tab bar** splits content into four tabs; within
-a tab, each section is **collapsible** (chevron, persisted in `CollapsedSections`)
-and **hideable** entirely from Settings (`HiddenSections`). Both are stored as
-comma-joined section-id strings in `@AppStorage`. The always-present footer
-carries Anthropic service + proxy status, and the menu-bar gauge **tints** to the
-nearest-wall limit color (else service-status color).
+The information architecture separates by **scope**, because the app reports two
+things that share neither units, window, nor source:
+- **claude.ai plan limits** — account-wide utilization % (covers claude.ai web +
+  desktop + Claude Code; excludes Ollama), 5h/7d rolling windows.
+- **Local token usage** — exact token counts from Claude Code transcripts +
+  Ollama on this Mac (excludes claude.ai web/desktop; includes Ollama).
 
-- **Now** — Limits (per-window progress bars, % colored green<70/yellow<90/red,
-  reset countdown like "resets in 2h 14m"; a connect prompt when no cookie),
-  Live calls (spinner, growing `↓` count, loaded Ollama model + VRAM, stable
-  "Idle" row), Latest calls (8 most recent, not period-scoped).
-- **Usage** — Today/7d/30d picker scopes the tab: the chart (per-hour for Today,
-  per-day otherwise; future slots blank), Stacked↔Grouped toggle, "Hide weekends"
-  filter (daily only), a Gaussian-kernel-regression trendline (Nadaraya–Watson,
-  bandwidth n/6 floored at 1.25, elapsed bars only, combined-total scale),
-  provider totals with per-model breakdown, sessions.
+So **Limits lives in an always-visible header** above the tabs (labeled "whole
+account · web + desktop + Code"), NOT in a tab — its scope/unit differ from the
+local-token tabs, and "how close to the wall" is the most actionable glance. The
+tabs are then purely local-token views. A custom (snapshot-renderable) **tab bar**
+splits them into four; within a tab each section is **collapsible** (persisted in
+`CollapsedSections`) and **hideable** from Settings (`HiddenSections`). The footer
+carries Anthropic service + proxy status; the menu-bar gauge tints to the nearest
+limit wall.
+
+- **Header (always on, except Settings)** — Limits: per-window bars, % colored by
+  the green→yellow→red gradient, reset countdowns, refresh; a connect prompt when
+  no cookie.
+- **Activity** — Live calls (spinner, growing `↓` count, loaded Ollama model +
+  VRAM, stable "Idle" row) and Latest calls (8 most recent, not period-scoped).
+- **Usage** — Today/7d/30d picker; a source caption ("Claude Code + Ollama on
+  this Mac"); the chart (per-hour for Today, per-day otherwise; future slots
+  blank), Stacked↔Grouped toggle, "Hide weekends" (daily only), a kernel-
+  regression trendline; provider totals with per-model breakdown; sessions.
 - **History** — 26-week heatmap with month labels; cell hue mixes provider
   colors by the day's share, opacity carries volume in 4 steps vs the 6-month max.
-- **Settings** — claude.ai cookie field, notification toggles, per-section
-  show/hide checkboxes.
+- **Settings** — claude.ai cookie field, menu-bar field picker, notification
+  toggles, per-section show/hide checkboxes.
+
+The title-bar headline splits today's tokens by provider (orange Claude / blue
+Ollama) rather than one merged number — a single figure is misleading when free
+local Ollama traffic dominates volume.
 
 Session titles come from Claude Code's own `{"type":"ai-title","aiTitle":…}`
 line (the exact name shown in `/resume`), falling back to older `"summary"`
