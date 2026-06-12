@@ -10,6 +10,7 @@ final class AppServices {
     let ollamaStatus: OllamaStatusPoller
     let limits: LimitsManager
     let status: StatusManager
+    let appearance: AppearanceWatcher
 
     private init() {
         let s = UsageStore()
@@ -19,6 +20,7 @@ final class AppServices {
         ollamaStatus = OllamaStatusPoller(store: s)
         limits = LimitsManager()
         status = StatusManager()
+        appearance = AppearanceWatcher()
         Notifier.requestAuthorization()
         watcher.start()
         proxy.start()
@@ -40,52 +42,35 @@ struct TokenScopeApp: App {
     @StateObject private var store = AppServices.shared.store
     @StateObject private var limits = AppServices.shared.limits
     @StateObject private var status = AppServices.shared.status
-    // Which fields the menu bar shows, in order: any of session,weekly,tokens.
+    @StateObject private var appearance = AppServices.shared.appearance
+    // Which fields the menu bar shows: any of session,weekly,tokens.
     @AppStorage("MenuBarItems") private var menuBarItemsRaw = "tokens"
 
     var body: some Scene {
         MenuBarExtra {
             MenuView(store: store, limits: limits, status: status)
         } label: {
-            menuBarContent
+            // ONE image — the menu bar reliably renders a single Image but drops
+            // elements from a multi-part label and strips text color.
+            Image(nsImage: menuBarImage)
         }
         .menuBarExtraStyle(.window)
     }
 
-    /// Menu-bar content. The colored gauge (a non-template image) carries the
-    /// nearest-wall utilization and its color, since text color is forced
-    /// monochrome in the status bar. Each value is prefixed with an intuitive
-    /// SF Symbol — a clock for the 5-hour session, a calendar for the week — so
-    /// the numbers are self-explanatory (no cryptic "5h"). Always shows the token
-    /// count if nothing else is selected, so the bar is never empty.
-    private var menuBarContent: some View {
+    /// Composited menu-bar bitmap: a labeled colored gauge per selected limit
+    /// window (5h session, 7d weekly), plus the daily token count. Each gauge
+    /// fills/colors to ITS OWN utilization. Always shows tokens if nothing else
+    /// resolves, so the bar is never empty.
+    private var menuBarImage: NSImage {
         let items = menuBarItemsRaw.split(separator: ",").map(String.init)
-        let showSession = items.contains("session") && limits.sessionPercent != nil
-        let showWeekly = items.contains("weekly") && limits.weeklyPercent != nil
-        let showTokens = items.contains("tokens") || (!showSession && !showWeekly)
-        return HStack(spacing: 5) {
-            Image(nsImage: MenuBarGauge.image(fraction: gaugeFraction))
-            if showSession, let p = limits.sessionPercent {
-                Label("\(p)%", systemImage: "clock")
-                    .labelStyle(.titleAndIcon)
-            }
-            if showWeekly, let p = limits.weeklyPercent {
-                Label("\(p)%", systemImage: "calendar")
-                    .labelStyle(.titleAndIcon)
-            }
-            if showTokens {
-                Text(store.menuTitle)
-            }
-        }
-        .imageScale(.small)
-        .monospacedDigit()
-    }
-
-    /// What the gauge fill/needle and color represent: the nearest rate-limit
-    /// wall (max of session/weekly) when connected; empty when not.
-    private var gaugeFraction: Double? {
-        guard limits.connected, let peak = limits.peakPercent else { return nil }
-        return Double(peak) / 100
+        let session = items.contains("session") ? limits.sessionPercent : nil
+        let weekly = items.contains("weekly") ? limits.weeklyPercent : nil
+        let wantTokens = items.contains("tokens") || (session == nil && weekly == nil)
+        return MenuBarRender.image(
+            sessionPct: session,
+            weeklyPct: weekly,
+            tokens: wantTokens ? store.menuTitle : nil,
+            dark: appearance.dark)
     }
 }
 
@@ -97,6 +82,8 @@ enum Main {
             MainActor.assumeIsolated { Snapshot.run(path: args[i + 1]) }
         } else if let i = args.firstIndex(of: "--gauges"), args.indices.contains(i + 1) {
             dumpGauges(dir: args[i + 1])
+        } else if let i = args.firstIndex(of: "--menubar"), args.indices.contains(i + 1) {
+            MainActor.assumeIsolated { dumpMenuBar(path: args[i + 1]) }
         } else {
             TokenScopeApp.main()
         }
@@ -124,5 +111,24 @@ enum Main {
             }
         }
         print("wrote gauges to \(dir)")
+    }
+
+    /// Renders the composited menu-bar label (session + weekly gauges + tokens)
+    /// onto a dark backdrop so the actual bar content can be eyeballed offline.
+    @MainActor
+    private static func dumpMenuBar(path: String) {
+        let label = MenuBarRender.image(sessionPct: 28, weeklyPct: 21, tokens: "2.85M", dark: true)
+        let scale: CGFloat = 6
+        let out = NSImage(size: NSSize(width: label.size.width * scale, height: label.size.height * scale))
+        out.lockFocus()
+        NSColor(white: 0.13, alpha: 1).setFill()
+        NSRect(origin: .zero, size: out.size).fill()
+        label.draw(in: NSRect(origin: .zero, size: out.size))
+        out.unlockFocus()
+        if let tiff = out.tiffRepresentation, let rep = NSBitmapImageRep(data: tiff),
+           let png = rep.representation(using: .png, properties: [:]) {
+            try? png.write(to: URL(fileURLWithPath: path))
+        }
+        print("wrote menubar mock to \(path)")
     }
 }

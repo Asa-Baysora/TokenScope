@@ -69,18 +69,24 @@ reason (`MenuView(snapshotInline: true)`).
 - The **claude.ai usage endpoint is unofficial** and the cookie is a session
   credential stored in UserDefaults (matches the upstream ClaudeUsageBar; a
   Keychain move is the obvious hardening if this graduates beyond personal use).
-- **Menu-bar text color is forced monochrome** by macOS — `.foregroundColor` on
-  a `Text` in the MenuBarExtra label is ignored. To show color there, draw a
-  NON-template `NSImage` (`isTemplate = false`); see `MenuBarGauge`. The gauge,
-  not the text, carries the limit color.
-- **Liquid Glass = navigation/control layer only.** Glass on the tab bar and
-  buttons (`glassEffect` / `.glassPill` / `GlassyButtonStyle`); content sections
-  use the legible `.sectionCard()` base-layer fill, NOT glass. Glass-on-glass
-  content cards hurt legibility and break Apple's guidance. Glass needs macOS 26
-  (`if #available`); fallbacks are material/bordered.
-- **ImageRenderer renders `glassEffect` as opaque WHITE** — snapshots cannot
-  verify glass surfaces (tab bar, glass buttons); they wash out. Verify glass
-  with the user's eyes. `.sectionCard()` and everything else snapshot fine.
+- **The menu bar drops elements from a multi-part SwiftUI label** and forces
+  text monochrome. Compose the WHOLE label (gauges + text) into ONE bitmap via
+  ImageRenderer and hand the bar a single `Image(nsImage:)` — see `MenuBarRender`.
+  A multi-element `HStack { Image; Label; Text }` silently rendered only the
+  trailing text. Gauges are non-template `NSImage` (`MenuBarGauge`) so their
+  color survives. Text color tracks light/dark via `AppearanceWatcher`
+  (re-render on `AppleInterfaceThemeChangedNotification`). `NSApp` is nil in the
+  `--snapshot`/`--menubar` paths — guard it.
+- **Verify the menu bar with `screencapture`**, not snapshots (the bar isn't in
+  the popup): `screencapture -x` full screen, then crop the top-right strip.
+  `--menubar <png>` dumps the composited label offline for a quick check.
+- **Liquid Glass: the MenuBarExtra(.window) popup is ALREADY system glass.**
+  Per Apple ("avoid glass on glass; glass is only the navigation layer above
+  content"), add NO `glassEffect` inside the popup — that was the "mess of radius
+  and glass." Controls are flat (the tab bar is a plain segmented control with a
+  solid accent selection); content groups use the subtle `.sectionCard()` fill.
+- **ImageRenderer renders `glassEffect` as opaque WHITE** — another reason not to
+  use it here; everything now snapshots faithfully.
 
 ## Efficiency (it's a 24/7 menu-bar app — keep idle cost ~0)
 

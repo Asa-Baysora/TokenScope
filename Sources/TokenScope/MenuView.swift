@@ -134,8 +134,11 @@ struct MenuView: View {
         }
     }
 
+    // Flat segmented control on top of the system glass popup: one subtle
+    // container, a single solid accent selection capsule, consistent radii.
+    // No nested glass (that was the "mess of radius and glass").
     private var tabBar: some View {
-        HStack(spacing: 4) {
+        HStack(spacing: 2) {
             ForEach(Tab.allCases) { tab in
                 let selected = activeTab == tab
                 Button { withAnimation(.easeInOut(duration: 0.15)) { activeTabRaw = tab.rawValue } } label: {
@@ -145,15 +148,20 @@ struct MenuView: View {
                     }
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 6)
+                    .background {
+                        if selected {
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .fill(Color.accentColor.opacity(0.20))
+                        }
+                    }
                     .contentShape(Rectangle())
-                    .glassPill(selected: selected, tint: .accentColor)
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(selected ? Color.accentColor : .secondary)
             }
         }
         .padding(3)
-        .glassCard(cornerRadius: 16)
+        .background(RoundedRectangle(cornerRadius: 11, style: .continuous).fill(Color.primary.opacity(0.04)))
     }
 
     // MARK: - Collapsible / hideable section plumbing
@@ -657,15 +665,14 @@ struct MenuView: View {
                             Text("· \(err)").font(.system(size: 11)).foregroundStyle(.orange).lineLimit(1)
                         }
                         Spacer()
-                        Button("Disconnect") { limits.clearCookie() }
-                            .buttonStyle(GlassyButtonStyle()).font(.system(size: 11))
+                        Button("Disconnect") { limits.clearCookie() }.font(.system(size: 11))
                     }
                 }
                 HStack(spacing: 6) {
                     SecureField("Cookie header value…", text: $cookieDraft)
                         .textFieldStyle(.roundedBorder).font(.system(size: 11))
                     Button("Save") { limits.setCookie(cookieDraft); cookieDraft = "" }
-                        .buttonStyle(GlassyButtonStyle(prominent: true))
+                        .buttonStyle(.borderedProminent)
                         .font(.system(size: 11))
                         .disabled(cookieDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
@@ -747,12 +754,10 @@ struct MenuView: View {
             }
             HStack {
                 Button("Copy Ollama env") { copyEnv() }
-                    .buttonStyle(GlassyButtonStyle())
                     .font(.system(size: 11))
                     .help("Copies the env vars that point Claude Code at Ollama through the proxy")
                 Spacer()
                 Button("Quit") { NSApp.terminate(nil) }
-                    .buttonStyle(GlassyButtonStyle())
                     .font(.system(size: 11))
             }
         }
