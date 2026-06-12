@@ -154,6 +154,19 @@ and renders the menu via `ImageRenderer` (scroll content inlined — ScrollView
 is NSScrollView-backed and won't render; segmented pickers/checkboxes show as
 placeholders). Env overrides: `SNAPSHOT_PERIOD`, `SNAPSHOT_HIDE_WEEKENDS`,
 `SNAPSHOT_BAR_STYLE`. Every UI change gets eyeballed this way before install.
+The menu-bar label isn't in the popup, so verify it with `screencapture` of the
+top strip, or render it offline with `--menubar out.png`.
+
+## Footprint
+
+It runs 24/7, so idle cost is a design constraint, not an afterthought. Measured
+idle (≈7.9k events in window): ~0.2% CPU (mostly 0.0%), ~165 MB RSS, 8 threads,
+~7 KB log. The work that keeps CPU near zero: the transcript watcher stats only
+recently-modified files each second (full directory walk every 10th tick); the
+clock timer runs only while a call is live; logging holds one handle open and is
+lifecycle-only, not per-event. Pollers are infrequent (limits/status 5 min,
+`/api/ps` 10 s). Memory is essentially the SwiftUI/AppKit baseline — the event
+log and history are only a couple MB.
 
 ## Known limitations
 

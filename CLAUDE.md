@@ -90,6 +90,12 @@ reason (`MenuView(snapshotInline: true)`).
 
 ## Efficiency (it's a 24/7 menu-bar app — keep idle cost ~0)
 
+Measured idle footprint (2026-06-11, ~7.9k events in window): **~0.2% CPU**
+average (most samples 0.0%, brief sub-2% blips from the 1 s hot-file check and
+pollers), **~165 MB RSS** (almost all SwiftUI/AppKit baseline — our data is a
+couple MB), 8 threads, ~7 KB log. CPU is the metric to guard; memory is
+framework baseline and not cheaply reducible without leaving SwiftUI.
+
 Idle CPU must stay near zero. Measured regressions that were fixed; don't undo:
 - **TranscriptWatcher** stats only recently-modified ("hot") files each second
   and does a full directory walk every 10th tick — NOT a full stat of all ~300
