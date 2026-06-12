@@ -67,6 +67,24 @@ one that sees non-Claude-Code Ollama clients (`OLLAMA_HOST=127.0.0.1:11435`).
 **3. `/api/ps` poller** (`OllamaStatusPoller`): every 10s, which model(s) are
 resident in Ollama's memory + VRAM, for the "Now" zone.
 
+**4. Plan limits** (`LimitsManager`): polls `claude.ai/api/organizations/{orgId}/usage`
+every 5 min using the user's claude.ai Cookie header (pasted in Settings, stored
+in app preferences). Parses `five_hour` / `seven_day` / `seven_day_sonnet`
+`utilization` (%) + `resets_at`. Org ID comes from the `lastActiveOrg` cookie
+crumb or `/api/bootstrap`. This is the "nearest rate-limit wall + reset" view.
+Unofficial endpoint — degrades gracefully (no cookie → connect prompt;
+401/403 → "re-copy cookie"). Fires threshold notifications (session 25/50/75/90%,
+weekly 50/75/90%) via `ThresholdTracker`, which fires each band once per climb
+and re-arms on drop. Adapted from github.com/Artzainnn/ClaudeUsageBar.
+
+**5. Service status** (`StatusManager`): polls the public
+`status.claude.com/api/v2/summary.json` (no auth) every 5 min for the overall
+indicator, non-operational components, and active incidents; notifies on
+indicator transitions. Answers "is it me or is Claude down?".
+
+Notifications go through `Notifier` (UNUserNotificationCenter; gated on a bundle
+identifier so the bare `--snapshot` binary doesn't raise an NSException).
+
 ## UsageStore: windows, history, reconciliation
 
 - **Live events window — 31 whole days.** `eventsCutoff` = startOfDay(now) − 31d.
@@ -94,28 +112,40 @@ resident in Ollama's memory + VRAM, for the "Now" zone.
 
 ## UI (MenuView)
 
-Four zones, ordered by immediacy, each answering one question:
+A custom (snapshot-renderable) **tab bar** splits content into four tabs; within
+a tab, each section is **collapsible** (chevron, persisted in `CollapsedSections`)
+and **hideable** entirely from Settings (`HiddenSections`). Both are stored as
+comma-joined section-id strings in `@AppStorage`. The always-present footer
+carries Anthropic service + proxy status, and the menu-bar gauge **tints** to the
+nearest-wall limit color (else service-status color).
 
-1. **Now** — live calls (spinner, growing `↓` count), loaded Ollama model +
-   VRAM; stable "Idle" row so the layout never jumps.
-2. **Usage** — Today/7d/30d picker lives in this zone's header and scopes
-   everything in it: the chart (per-hour for Today, per-day otherwise; future
-   slots blank), Stacked↔Grouped bar toggle, "Hide weekends" filter (daily
-   charts only), a Gaussian-kernel-regression trendline (Nadaraya–Watson,
-   bandwidth n/6 floored at 1.25, fitted to elapsed bars only, combined-total
-   scale), provider totals with per-model breakdown, sessions (title from
-   transcript summaries / first user message).
-3. **Latest calls** — 8 most recent, deliberately not period-scoped.
-4. **Last 6 months** — 26-week heatmap with month labels. Cell hue mixes the
-   provider colors by the day's share (orange = Claude, blue = Ollama); opacity
-   carries volume in 4 steps vs the 6-month max.
+- **Now** — Limits (per-window progress bars, % colored green<70/yellow<90/red,
+  reset countdown like "resets in 2h 14m"; a connect prompt when no cookie),
+  Live calls (spinner, growing `↓` count, loaded Ollama model + VRAM, stable
+  "Idle" row), Latest calls (8 most recent, not period-scoped).
+- **Usage** — Today/7d/30d picker scopes the tab: the chart (per-hour for Today,
+  per-day otherwise; future slots blank), Stacked↔Grouped toggle, "Hide weekends"
+  filter (daily only), a Gaussian-kernel-regression trendline (Nadaraya–Watson,
+  bandwidth n/6 floored at 1.25, elapsed bars only, combined-total scale),
+  provider totals with per-model breakdown, sessions.
+- **History** — 26-week heatmap with month labels; cell hue mixes provider
+  colors by the day's share, opacity carries volume in 4 steps vs the 6-month max.
+- **Settings** — claude.ai cookie field, notification toggles, per-section
+  show/hide checkboxes.
+
+Session titles come from Claude Code's own `{"type":"ai-title","aiTitle":…}`
+line (the exact name shown in `/resume`), falling back to older `"summary"`
+lines, then the first user message.
 
 Menu bar label: today's input+output (cache excluded); switches to a live `↓`
 counter while a proxied call streams.
 
 **Critical layout constraint**: MenuBarExtra windows size to the view's *ideal*
 height and a ScrollView's ideal height is ~0 — the scroll area must keep its
-fixed `.frame(height:)`.
+fixed `.frame(height:)`. Segmented pickers, checkboxes, SecureField, and
+ScrollView are AppKit-backed and render as placeholders in snapshots; the custom
+tab bar is plain SwiftUI so it renders. `SNAPSHOT_TAB`/`SNAPSHOT_PERIOD`/
+`SNAPSHOT_HIDE_WEEKENDS`/`SNAPSHOT_BAR_STYLE` env vars drive snapshot states.
 
 ## Snapshot verification
 

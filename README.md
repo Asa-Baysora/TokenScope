@@ -1,18 +1,20 @@
 # TokenScope
 
 macOS menu bar app showing live LLM token usage — per call, per session, per day —
-for both **native Claude (Claude Code)** and **Ollama**.
+for both **native Claude (Claude Code)** and **Ollama**, plus your **claude.ai plan
+limits** and **Anthropic service status**.
 
 ## How it measures
 
-Two independent sources, reconciled automatically:
+Token usage comes from two independent sources, reconciled automatically:
 
 1. **Claude Code transcripts** (`~/.claude/projects/**/*.jsonl`). Every API response
    Claude Code receives is logged there with exact `usage` counts (input, output,
    cache read, cache write), the session ID, and the project directory. TokenScope
    tails these files once a second. This covers native Anthropic usage *and* Claude
    Code pointed at Ollama — no configuration needed. On launch it replays today's
-   transcripts so the day's history is populated immediately.
+   transcripts so the day's history is populated immediately. Session names are
+   Claude Code's own auto-generated titles (the ones you see in `/resume`).
 
 2. **Local Ollama proxy** (`127.0.0.1:11435 → 127.0.0.1:11434`). A transparent TCP
    relay that parses token counts out of responses as they stream — Ollama-native,
@@ -21,6 +23,18 @@ Two independent sources, reconciled automatically:
    Claude Code (`ollama run`, scripts, other apps). When the same call is seen by
    both sources (Claude Code routed through the proxy), the proxy copy is shadowed
    so totals count it once.
+
+Two more panels track things tokens alone don't tell you (features adapted from
+[ClaudeUsageBar](https://github.com/Artzainnn/ClaudeUsageBar)):
+
+3. **Plan limits** (optional). Paste your claude.ai Cookie header in Settings and
+   the Now tab shows your 5-hour session and 7-day weekly utilization as
+   color-coded bars with reset countdowns, and alerts you at 25/50/75/90%. This is
+   the "how close am I to being throttled" view. Uses an unofficial claude.ai
+   endpoint; the cookie is stored locally and sent only to claude.ai.
+
+4. **Service status**. Polls Anthropic's public status page so you can tell "is it
+   me, or is Claude down?" — shown in the footer, with optional change alerts.
 
 ## Build & run
 
@@ -57,31 +71,38 @@ ollama run gemma4:12b-mlx
 
 ## Reading the menu
 
-The menu is four zones, top to bottom by immediacy, each answering one question:
+Four tabs. Within any tab, click a section's title to collapse it; in **Settings**
+you can hide sections entirely.
 
-- **Now** — what's happening this second: in-flight calls with a growing output
-  counter (proxy streams update live; Anthropic-format streams count chunks until
-  the exact total arrives at message end), plus which Ollama model is resident in
-  memory and its VRAM. Shows "Idle" when nothing is streaming.
-- **Usage** — everything in this zone obeys the Today / 7 Days / 30 Days picker in
-  its header: the bar chart (per **hour** for Today, per **day** otherwise; future
-  slots are blank), provider totals with per-model breakdown, and sessions (green
-  dot = active in the last 15 minutes; direct Ollama traffic groups under "Ollama
-  (direct)"). The chart toggles Stacked ↔ Grouped via the mini control — Stacked
-  scales to combined totals, Grouped scales per-provider so orange and blue bars
-  compare directly.
-- **Latest calls** — the 8 most recent calls (time, provider dot, model,
-  `↑ input (+cache read) ↓ output`), deliberately *not* period-scoped.
-- **Last 6 months** — GitHub-style heatmap with month labels. Cell hue mixes the
-  provider colors by that day's share (orange = all Claude, blue = all Ollama,
-  amber/violet in between); opacity carries the day's volume. Hover any cell for
-  the exact split. Days that age out of the 31-day live window fold permanently
-  into `~/Library/Application Support/TokenScope/daily-history.json`, which
-  outlives Claude Code's own transcript cleanup, so this fills in over time.
+- **Now** — *Limits*: your claude.ai session (5h) and weekly (7d) utilization as
+  color-coded bars (green < 70%, yellow < 90%, red ≥ 90%) with reset countdowns,
+  or a "Connect claude.ai" prompt if no cookie is set. *Live*: in-flight calls
+  with a growing output counter (proxy streams update live; Anthropic-format
+  streams count chunks until the exact total lands at message end), plus the
+  Ollama model resident in memory and its VRAM. *Latest calls*: the 8 most recent
+  (time, provider dot, model, `↑ input (+cache read) ↓ output`), not period-scoped.
+- **Usage** — obeys the Today / 7 Days / 30 Days picker: the bar chart (per **hour**
+  for Today, per **day** otherwise; future slots blank) with a Stacked ↔ Grouped
+  toggle and "Hide weekends" filter and a dashed kernel-regression trendline;
+  provider totals with per-model breakdown; sessions (green dot = active in the
+  last 15 min; named with Claude Code's own `/resume` titles).
+- **History** — GitHub-style 6-month heatmap with month labels. Cell hue mixes the
+  provider colors by that day's share (orange = all Claude, blue = all Ollama);
+  opacity carries the day's volume. Days that age out of the 31-day live window
+  fold permanently into `daily-history.json`, which outlives Claude Code's own
+  transcript cleanup, so this fills in over time.
+- **Settings** — paste your claude.ai Cookie header; choose what the **menu bar
+  shows** (any of session limit %, weekly limit %, daily token count); toggle
+  limit/status notifications; and show/hide any section.
 
-The menu bar itself shows today's total tokens (input + output, cache excluded),
-switching to a live `↓` counter while a call streams through the proxy. Proxy
-events persist in `~/Library/Application Support/TokenScope/proxy-events.jsonl`.
+The **footer** (always visible) shows Anthropic service status on the left and the
+proxy on the right. The **menu bar gauge** tints green/yellow/red to your nearest
+limit (or the service-status color). By default the menu bar shows today's total
+tokens (a live `↓` counter while a call streams through the proxy); enable session
+and/or weekly limit % in Settings to show those too — each colored green < 70%,
+yellow < 90%, red ≥ 90%.
+
+Proxy events persist in `~/Library/Application Support/TokenScope/proxy-events.jsonl`.
 
 ## Settings
 

@@ -142,16 +142,28 @@ final class TranscriptWatcher {
     // Cheap byte-level pre-filter so bulk replay doesn't JSON-decode every line;
     // assistant lines always contain this, anything else that does just gets decoded.
     private static let assistantMarker = Data("\"assistant\"".utf8)
+    private static let aiTitleMarker = Data("\"ai-title\"".utf8)
     private static let summaryMarker = Data("\"type\":\"summary\"".utf8)
     private static let userMarker = Data("\"type\":\"user\"".utf8)
 
     private var fallbackNamed = Set<String>()   // sessions with a first-message name sent
 
-    /// Non-assistant lines that name the session: Claude Code writes
-    /// `{"type":"summary","summary":"…"}` lines into the transcript; sessions
-    /// without one get their first real user message as a fallback title.
+    /// Non-assistant lines that name the session. Authoritative source is the
+    /// `{"type":"ai-title","aiTitle":"…"}` line — the exact name Claude Code
+    /// generates and shows in /resume. Older Claude Code wrote `"summary"`
+    /// lines instead; both are honored. Sessions with neither fall back to the
+    /// first real user message.
     private func handleMeta(_ data: Data, file: URL) {
         let fileSession = file.deletingPathExtension().lastPathComponent
+        if data.range(of: Self.aiTitleMarker) != nil {
+            if let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+               obj["type"] as? String == "ai-title",
+               let title = (obj["aiTitle"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !title.isEmpty {
+                store.setSessionName(obj["sessionId"] as? String ?? fileSession, title)
+            }
+            return
+        }
         if data.range(of: Self.summaryMarker) != nil {
             if let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
                obj["type"] as? String == "summary",

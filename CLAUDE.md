@@ -3,7 +3,12 @@
 TokenScope is a macOS menu bar app (SwiftPM, SwiftUI `MenuBarExtra`) that meters
 LLM token usage — live, per call, per session, per day — for Claude Code (native
 Anthropic or pointed at Ollama) and for any Ollama client routed through its
-local proxy. See `docs/ARCHITECTURE.md` for the full design.
+local proxy. It also tracks claude.ai plan limits (session/weekly utilization,
+reset timers, threshold alerts) and Anthropic service status. See
+`docs/ARCHITECTURE.md` for the full design.
+
+UI is tabbed (Now / Usage / History / Settings); sections within a tab are
+collapsible (persisted) and hideable from Settings.
 
 ## Build, verify, install
 
@@ -53,6 +58,17 @@ reason (`MenuView(snapshotInline: true)`).
   for lines split by chunked-transfer framing.
 - `ollama` provider classification is just `model.hasPrefix("claude")` → claude,
   else ollama. Transcript `model == "<synthetic>"` lines are skipped.
+- **Session names** come from Claude Code's `{"type":"ai-title","aiTitle":…}`
+  line (the exact `/resume` name), then older `"summary"` lines, then first user
+  message. ai-title overwrites; fallback only fills gaps.
+- **Notifications** must be gated on `Bundle.main.bundleIdentifier != nil` —
+  `UNUserNotificationCenter.current()` raises an NSException in the bare
+  `--snapshot` binary. See `Notifier.available`.
+- **Tab bar is a custom button row, not a segmented Picker** — deliberately, so
+  it renders in snapshots. Don't "simplify" it to a Picker.
+- The **claude.ai usage endpoint is unofficial** and the cookie is a session
+  credential stored in UserDefaults (matches the upstream ClaudeUsageBar; a
+  Keychain move is the obvious hardening if this graduates beyond personal use).
 
 ## Runtime files
 

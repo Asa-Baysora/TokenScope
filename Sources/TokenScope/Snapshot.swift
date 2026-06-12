@@ -12,12 +12,13 @@ enum Snapshot {
         if let p = env["SNAPSHOT_PERIOD"] { UserDefaults.standard.set(p, forKey: "StatsPeriod") }
         if let w = env["SNAPSHOT_HIDE_WEEKENDS"] { UserDefaults.standard.set(w == "1", forKey: "HideWeekends") }
         if let s = env["SNAPSHOT_BAR_STYLE"] { UserDefaults.standard.set(s, forKey: "BarChartStyle") }
+        if let t = env["SNAPSHOT_TAB"] { UserDefaults.standard.set(t, forKey: "ActiveTab") }
 
         let services = AppServices.shared
         // Let the transcript replay, proxy, and pollers populate the store.
         RunLoop.main.run(until: Date().addingTimeInterval(8))
 
-        let view = MenuView(store: services.store, snapshotInline: true)
+        let view = MenuView(store: services.store, limits: services.limits, status: services.status, snapshotInline: true)
         let renderer = ImageRenderer(content: view)
         renderer.scale = 2
         guard let img = renderer.nsImage,
