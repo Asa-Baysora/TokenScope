@@ -117,13 +117,24 @@ enum Main {
     /// onto a dark backdrop so the actual bar content can be eyeballed offline.
     @MainActor
     private static func dumpMenuBar(path: String) {
-        let label = MenuBarRender.image(sessionPct: 28, weeklyPct: 21, tokens: "2.85M", dark: true)
+        // Several selections stacked, to verify separators and the both-on labels.
+        let cases: [NSImage] = [
+            MenuBarRender.image(sessionPct: 28, weeklyPct: nil, tokens: nil, dark: true),
+            MenuBarRender.image(sessionPct: 28, weeklyPct: nil, tokens: "2.85M", dark: true),
+            MenuBarRender.image(sessionPct: 28, weeklyPct: 21, tokens: "2.85M", dark: true),
+        ]
         let scale: CGFloat = 6
-        let out = NSImage(size: NSSize(width: label.size.width * scale, height: label.size.height * scale))
+        let rowH = (cases.map(\.size.height).max() ?? 16) * scale
+        let width = (cases.map(\.size.width).max() ?? 100) * scale
+        let gap: CGFloat = 10
+        let out = NSImage(size: NSSize(width: width, height: rowH * CGFloat(cases.count) + gap * CGFloat(cases.count + 1)))
         out.lockFocus()
         NSColor(white: 0.13, alpha: 1).setFill()
         NSRect(origin: .zero, size: out.size).fill()
-        label.draw(in: NSRect(origin: .zero, size: out.size))
+        for (i, label) in cases.enumerated() {
+            let y = gap + (rowH + gap) * CGFloat(cases.count - 1 - i)
+            label.draw(in: NSRect(x: gap, y: y, width: label.size.width * scale, height: rowH))
+        }
         out.unlockFocus()
         if let tiff = out.tiffRepresentation, let rep = NSBitmapImageRep(data: tiff),
            let png = rep.representation(using: .png, properties: [:]) {

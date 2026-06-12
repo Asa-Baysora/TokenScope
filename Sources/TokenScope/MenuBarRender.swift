@@ -10,16 +10,32 @@ import AppKit
 enum MenuBarRender {
     @MainActor
     static func image(sessionPct: Int?, weeklyPct: Int?, tokens: String?, dark: Bool) -> NSImage {
-        let content = HStack(spacing: 7) {
-            if let s = sessionPct { gaugeItem(fraction: Double(s) / 100, label: "5h", pct: s) }
-            if let w = weeklyPct { gaugeItem(fraction: Double(w) / 100, label: "7d", pct: w) }
-            if let t = tokens {
-                Text(t).font(.system(size: 12, weight: .medium)).monospacedDigit()
+        // The 5h/7d labels only earn their space when both gauges are shown and
+        // would otherwise be ambiguous; a lone gauge needs no label.
+        let labelLimits = sessionPct != nil && weeklyPct != nil
+        var segments: [AnyView] = []
+        if let s = sessionPct {
+            segments.append(AnyView(gaugeItem(fraction: Double(s) / 100, label: labelLimits ? "5h" : nil, pct: s)))
+        }
+        if let w = weeklyPct {
+            segments.append(AnyView(gaugeItem(fraction: Double(w) / 100, label: labelLimits ? "7d" : nil, pct: w)))
+        }
+        if let t = tokens {
+            segments.append(AnyView(Text(t).font(.system(size: 12, weight: .medium)).monospacedDigit()))
+        }
+
+        let content = HStack(spacing: 6) {
+            ForEach(Array(segments.enumerated()), id: \.offset) { idx, seg in
+                if idx > 0 {
+                    Text("|").font(.system(size: 11)).foregroundStyle(.tertiary)
+                }
+                seg
             }
         }
         .foregroundStyle(.primary)
         .environment(\.colorScheme, dark ? .dark : .light)
         .padding(.horizontal, 1)
+        .fixedSize()   // intrinsic width — without this ImageRenderer truncates ("28%"→"2…")
 
         let renderer = ImageRenderer(content: content)
         renderer.scale = 2   // retina menu bar
@@ -29,10 +45,11 @@ enum MenuBarRender {
     }
 
     @ViewBuilder
-    private static func gaugeItem(fraction: Double, label: String, pct: Int) -> some View {
+    private static func gaugeItem(fraction: Double, label: String?, pct: Int) -> some View {
         HStack(spacing: 3) {
             Image(nsImage: MenuBarGauge.image(fraction: fraction))
-            Text("\(label) \(pct)%").font(.system(size: 12, weight: .medium)).monospacedDigit()
+            Text(label.map { "\($0) \(pct)%" } ?? "\(pct)%")
+                .font(.system(size: 12, weight: .medium)).monospacedDigit()
         }
     }
 }
