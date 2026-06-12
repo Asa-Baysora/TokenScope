@@ -69,6 +69,30 @@ reason (`MenuView(snapshotInline: true)`).
 - The **claude.ai usage endpoint is unofficial** and the cookie is a session
   credential stored in UserDefaults (matches the upstream ClaudeUsageBar; a
   Keychain move is the obvious hardening if this graduates beyond personal use).
+- **Menu-bar text color is forced monochrome** by macOS — `.foregroundColor` on
+  a `Text` in the MenuBarExtra label is ignored. To show color there, draw a
+  NON-template `NSImage` (`isTemplate = false`); see `MenuBarGauge`. The gauge,
+  not the text, carries the limit color.
+- **Liquid Glass = navigation/control layer only.** Glass on the tab bar and
+  buttons (`glassEffect` / `.glassPill` / `GlassyButtonStyle`); content sections
+  use the legible `.sectionCard()` base-layer fill, NOT glass. Glass-on-glass
+  content cards hurt legibility and break Apple's guidance. Glass needs macOS 26
+  (`if #available`); fallbacks are material/bordered.
+- **ImageRenderer renders `glassEffect` as opaque WHITE** — snapshots cannot
+  verify glass surfaces (tab bar, glass buttons); they wash out. Verify glass
+  with the user's eyes. `.sectionCard()` and everything else snapshot fine.
+
+## Efficiency (it's a 24/7 menu-bar app — keep idle cost ~0)
+
+Idle CPU must stay near zero. Measured regressions that were fixed; don't undo:
+- **TranscriptWatcher** stats only recently-modified ("hot") files each second
+  and does a full directory walk every 10th tick — NOT a full stat of all ~300
+  files every second (that alone was ~3–20% idle CPU).
+- **UsageStore's clock timer runs only while calls are live** (`startTickingIfNeeded`),
+  stopping itself when `liveCalls` empties — no idle wakeups recomputing the label.
+- **FileLog holds one file handle open** and does NOT log per-event (per-event at
+  replay scale produced a 17 MB / 178k-line log). Lifecycle summaries only.
+- Pollers: limits 5 min, status 5 min, `/api/ps` 10 s. Don't add per-second work.
 
 ## Runtime files
 

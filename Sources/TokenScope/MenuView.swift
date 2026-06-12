@@ -137,21 +137,23 @@ struct MenuView: View {
     private var tabBar: some View {
         HStack(spacing: 4) {
             ForEach(Tab.allCases) { tab in
-                Button { activeTabRaw = tab.rawValue } label: {
+                let selected = activeTab == tab
+                Button { withAnimation(.easeInOut(duration: 0.15)) { activeTabRaw = tab.rawValue } } label: {
                     VStack(spacing: 2) {
                         Image(systemName: tab.icon).font(.system(size: 12))
-                        Text(tab.title).font(.system(size: 9.5))
+                        Text(tab.title).font(.system(size: 9.5, weight: selected ? .semibold : .regular))
                     }
                     .frame(maxWidth: .infinity)
-                    .padding(.vertical, 5)
-                    .background(activeTab == tab ? Color.accentColor.opacity(0.18) : Color.clear)
-                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                    .padding(.vertical, 6)
                     .contentShape(Rectangle())
+                    .glassPill(selected: selected, tint: .accentColor)
                 }
                 .buttonStyle(.plain)
-                .foregroundStyle(activeTab == tab ? Color.accentColor : .secondary)
+                .foregroundStyle(selected ? Color.accentColor : .secondary)
             }
         }
+        .padding(3)
+        .glassCard(cornerRadius: 16)
     }
 
     // MARK: - Collapsible / hideable section plumbing
@@ -174,12 +176,13 @@ struct MenuView: View {
     private func section<Content: View>(_ s: AppSection, @ViewBuilder _ content: () -> Content) -> some View {
         if !isHidden(s) {
             let collapsed = isCollapsed(s)
-            VStack(alignment: .leading, spacing: 6) {
-                Button { toggleCollapsed(s) } label: {
-                    HStack(spacing: 4) {
-                        Image(systemName: collapsed ? "chevron.right" : "chevron.down")
+            VStack(alignment: .leading, spacing: collapsed ? 0 : 8) {
+                Button { withAnimation(.easeInOut(duration: 0.18)) { toggleCollapsed(s) } } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: "chevron.right")
                             .font(.system(size: 9, weight: .semibold))
                             .foregroundStyle(.secondary)
+                            .rotationEffect(.degrees(collapsed ? 0 : 90))
                             .frame(width: 10)
                         sectionTitle(s.title)
                         Spacer()
@@ -187,8 +190,11 @@ struct MenuView: View {
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                if !collapsed { content().padding(.leading, 14) }
+                if !collapsed { content() }
             }
+            .padding(11)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .sectionCard(cornerRadius: 13)
         }
     }
 
@@ -231,16 +237,32 @@ struct MenuView: View {
                 Text(err).font(.system(size: 11)).foregroundStyle(.secondary)
             }
         } else if limits.windows.isEmpty {
-            Text("Loading limits…").font(.system(size: 11)).foregroundStyle(.secondary)
+            HStack(spacing: 6) {
+                Text("Loading limits…").font(.system(size: 11)).foregroundStyle(.secondary)
+                refreshButton
+            }
         } else {
             VStack(alignment: .leading, spacing: 7) {
                 ForEach(limits.windows) { w in limitRow(w) }
-                if let when = limits.lastUpdated {
-                    Text("updated \(Fmt.time.string(from: when))")
-                        .font(.system(size: 9.5)).foregroundStyle(.secondary)
+                HStack(spacing: 6) {
+                    if let when = limits.lastUpdated {
+                        Text("updated \(Fmt.time.string(from: when))")
+                            .font(.system(size: 9.5)).foregroundStyle(.secondary)
+                    }
+                    refreshButton
+                    Spacer()
                 }
             }
         }
+    }
+
+    private var refreshButton: some View {
+        Button { limits.refresh() } label: {
+            Image(systemName: "arrow.clockwise").font(.system(size: 10, weight: .semibold))
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(.secondary)
+        .help("Refresh limit usage now")
     }
 
     private func limitRow(_ w: LimitWindow) -> some View {
@@ -635,13 +657,15 @@ struct MenuView: View {
                             Text("· \(err)").font(.system(size: 11)).foregroundStyle(.orange).lineLimit(1)
                         }
                         Spacer()
-                        Button("Disconnect") { limits.clearCookie() }.font(.system(size: 11))
+                        Button("Disconnect") { limits.clearCookie() }
+                            .buttonStyle(GlassyButtonStyle()).font(.system(size: 11))
                     }
                 }
                 HStack(spacing: 6) {
                     SecureField("Cookie header value…", text: $cookieDraft)
                         .textFieldStyle(.roundedBorder).font(.system(size: 11))
                     Button("Save") { limits.setCookie(cookieDraft); cookieDraft = "" }
+                        .buttonStyle(GlassyButtonStyle(prominent: true))
                         .font(.system(size: 11))
                         .disabled(cookieDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
@@ -723,10 +747,13 @@ struct MenuView: View {
             }
             HStack {
                 Button("Copy Ollama env") { copyEnv() }
+                    .buttonStyle(GlassyButtonStyle())
                     .font(.system(size: 11))
                     .help("Copies the env vars that point Claude Code at Ollama through the proxy")
                 Spacer()
-                Button("Quit") { NSApp.terminate(nil) }.font(.system(size: 11))
+                Button("Quit") { NSApp.terminate(nil) }
+                    .buttonStyle(GlassyButtonStyle())
+                    .font(.system(size: 11))
             }
         }
     }

@@ -88,16 +88,44 @@ final class TranscriptWatcher {
         return out
     }
 
+    // Cadence: a full directory walk + stat of all files is expensive (hundreds of
+    // files). Almost always only the current session file is being written, so we
+    // stat just the "hot" files (modified recently) every tick, and do a full walk
+    // only every Nth tick to discover new files. Cuts idle work from O(all files)
+    // per second to ~O(1).
+    private var tick = 0
+    private var activePaths: Set<String> = []
+    private static let fullScanEveryTicks = 10        // full walk every ~10s
+    private static let hotWindow: TimeInterval = 180  // "active" = written in last 3 min
+
     private func scan() {
-        for u in jsonlFiles() {
-            let size = ((try? u.resourceValues(forKeys: [.fileSizeKey]))?.fileSize).map(UInt64.init) ?? 0
-            let off = offsets[u.path] ?? 0
-            if size > off {
-                readNew(u, from: off)
-            } else if size < off {
-                offsets[u.path] = size
-            }
+        if tick % Self.fullScanEveryTicks == 0 {
+            fullScan()
+        } else {
+            for path in activePaths { checkFile(URL(fileURLWithPath: path)) }
         }
+        tick += 1
+    }
+
+    private func fullScan() {
+        let hotCutoff = Date().addingTimeInterval(-Self.hotWindow)
+        var active: Set<String> = []
+        for u in jsonlFiles() {
+            let vals = try? u.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
+            let size = UInt64(vals?.fileSize ?? 0)
+            let off = offsets[u.path] ?? 0
+            if size > off { readNew(u, from: off) }
+            else if size < off { offsets[u.path] = size }
+            if (vals?.contentModificationDate ?? .distantPast) > hotCutoff { active.insert(u.path) }
+        }
+        activePaths = active
+    }
+
+    private func checkFile(_ url: URL) {
+        let size = ((try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize).map(UInt64.init) ?? 0
+        let off = offsets[url.path] ?? 0
+        if size > off { readNew(url, from: off) }
+        else if size < off { offsets[url.path] = size }
     }
 
     private func readNew(_ url: URL, from offset: UInt64) {

@@ -29,17 +29,21 @@ enum FileLog {
         f.dateFormat = "yyyy-MM-dd HH:mm:ss"
         return f
     }()
+    // Held open across writes (all serialized on `queue`) so logging isn't an
+    // open/seek/write/close syscall storm.
+    private static var handle: FileHandle?
 
     static func log(_ message: String) {
         queue.async {
             let line = "\(stamp.string(from: Date())) \(message)\n"
-            if let h = try? FileHandle(forWritingTo: url) {
-                _ = try? h.seekToEnd()
-                try? h.write(contentsOf: Data(line.utf8))
-                try? h.close()
-            } else {
-                try? Data(line.utf8).write(to: url)
+            if handle == nil {
+                if !FileManager.default.fileExists(atPath: url.path) {
+                    FileManager.default.createFile(atPath: url.path, contents: nil)
+                }
+                handle = try? FileHandle(forWritingTo: url)
+                _ = try? handle?.seekToEnd()
             }
+            try? handle?.write(contentsOf: Data(line.utf8))
         }
     }
 }

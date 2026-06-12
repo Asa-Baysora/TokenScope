@@ -67,10 +67,22 @@ final class UsageStore: ObservableObject {
         upstreamPort = u > 0 ? UInt16(u) : 11434
         loadPersistedProxyEvents()
         loadHistory()
-        timer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+    }
+
+    /// The clock timer only runs while calls are in flight — it drives the live
+    /// `↓` counter and prunes stale calls. When idle there's nothing to animate,
+    /// so we stop it entirely rather than waking the app (and recomputing the
+    /// menu-bar label) every couple of seconds for nothing.
+    private func startTickingIfNeeded() {
+        guard timer == nil, !liveCalls.isEmpty else { return }
+        timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
             guard let self else { return }
             self.now = Date()
             self.pruneStaleLiveCalls()
+            if self.liveCalls.isEmpty {
+                self.timer?.invalidate()
+                self.timer = nil
+            }
         }
     }
 
@@ -95,7 +107,9 @@ final class UsageStore: ObservableObject {
             }
             self.events.append(e)
             self.trim()
-            FileLog.log("transcript \(e.provider.rawValue) \(e.model) in=\(e.inputTokens) out=\(e.outputTokens) cacheR=\(e.cacheReadTokens) session=\(e.sessionId?.prefix(8) ?? "-")")
+            // Intentionally not logged per-event: at thousands of events/replay this
+            // dominated both the log size and the write overhead. Lifecycle summaries
+            // (replay complete, proxy, limits, status) are logged instead.
         }
     }
 
@@ -113,6 +127,7 @@ final class UsageStore: ObservableObject {
             } else {
                 self.liveCalls.append(call)
             }
+            self.startTickingIfNeeded()
         }
     }
 
