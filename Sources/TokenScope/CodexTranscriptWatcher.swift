@@ -12,10 +12,15 @@ final class CodexTranscriptWatcher {
     private let queue = DispatchQueue(label: "tokenscope.codex-transcripts", qos: .utility)
     private var timer: DispatchSourceTimer?
     private var monitorObserver: NSObjectProtocol?
+    private var refreshObserver: NSObjectProtocol?
     private var offsets: [String: UInt64] = [:]
     private var activePaths: Set<String> = []
     private var sessionMetadata: [String: (id: String, project: String?)] = [:]
     private var tick = 0
+    private var backfillFrom = Date.distantPast
+    private var backfilling = false
+    private var backfillBatch: [String: DayAgg] = [:]
+    private var backfillSeen = Set<String>()
 
     private static let fullScanEveryTicks = 10
     private static let hotWindow: TimeInterval = 180
@@ -37,6 +42,7 @@ final class CodexTranscriptWatcher {
         queue.async { [weak self] in
             self?.bootstrap()
             self?.scan()
+            self?.finishBackfillIfNeeded()
         }
         let timer = DispatchSource.makeTimerSource(queue: queue)
         timer.schedule(deadline: .now() + 3, repeating: 1)
@@ -47,6 +53,25 @@ final class CodexTranscriptWatcher {
             forName: OpenAILimitsManager.monitoringChanged, object: nil, queue: nil
         ) { [weak self] _ in
             self?.queue.async { self?.monitoringChanged() }
+        }
+        refreshObserver = NotificationCenter.default.addObserver(
+            forName: OpenAILimitsManager.refreshRequested, object: nil, queue: nil
+        ) { [weak self] _ in
+            self?.queue.async {
+                guard let self, self.enabled else { return }
+                // A normal scan only tails new bytes. Refresh intentionally
+                // replays the current window so the latest saved quota record
+                // is re-observed even if Codex has been idle. Usage events are
+                // keyed by file byte offset, so this cannot double-count them.
+                self.offsets = [:]
+                self.activePaths = []
+                self.sessionMetadata = [:]
+                self.tick = 0
+                self.bootstrap()
+                self.fullScan()
+                self.finishBackfillIfNeeded()
+                FileLog.log("Codex limits refreshed from local sessions")
+            }
         }
     }
 
@@ -62,24 +87,38 @@ final class CodexTranscriptWatcher {
         tick = 0
         bootstrap()
         scan()
+        finishBackfillIfNeeded()
         FileLog.log("Codex transcript watcher resumed")
     }
 
-    /// A file whose newest modification predates the live window cannot contain
-    /// an event TokenScope needs. Skip it at EOF rather than replaying years of
-    /// local history. Events that later age out are folded into DayAgg normally.
+    /// Replays the live window and, once per persisted gap, folds up to a year
+    /// of older local Codex logs into the same permanent day history Claude uses.
+    /// Files older than the gap cannot contribute anything new and start at EOF.
     private func bootstrap() {
         let cutoff = store.eventsCutoff
+        let ancient = Date().addingTimeInterval(-366 * 86400)
+        backfillFrom = max(store.codexHistoryCompleteThrough, ancient)
+        backfilling = backfillFrom < cutoff
+        backfillBatch = [:]
+        backfillSeen = []
         var read = 0
         for url in jsonlFiles() {
             let values = try? url.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey])
-            if (values?.contentModificationDate ?? .distantPast) < cutoff {
+            if (values?.contentModificationDate ?? .distantPast) < backfillFrom {
                 offsets[url.path] = UInt64(values?.fileSize ?? 0)
             } else {
                 read += 1
             }
         }
-        FileLog.log("Codex watcher started; reading \(read) files since \(UsageStore.dayKey(cutoff))")
+        FileLog.log("Codex watcher started; reading \(read) files (events since \(UsageStore.dayKey(cutoff)), backfill from \(UsageStore.dayKey(backfillFrom)))")
+    }
+
+    private func finishBackfillIfNeeded() {
+        guard backfilling else { return }
+        store.mergeCodexHistorical(backfillBatch, coverThrough: store.eventsCutoff)
+        backfillBatch = [:]
+        backfillSeen = []
+        backfilling = false
     }
 
     private func jsonlFiles() -> [URL] {
@@ -190,7 +229,7 @@ final class CodexTranscriptWatcher {
         }
         guard line.type == "event_msg", line.payload?.type == "token_count" else { return }
         let timestamp = line.timestamp.flatMap { Self.isoFrac.date(from: $0) ?? Self.iso.date(from: $0) } ?? Date()
-        guard timestamp >= store.eventsCutoff else { return }
+        let liveCutoff = store.eventsCutoff
         if let limits = line.payload?.rate_limits {
             self.limits.observe(
                 primary: window(limits.primary), secondary: window(limits.secondary), at: timestamp)
@@ -211,7 +250,12 @@ final class CodexTranscriptWatcher {
             cacheReadTokens: usage.cached_input_tokens ?? 0,
             cacheCreationTokens: 0,
             reasoningTokens: usage.reasoning_output_tokens ?? 0)
-        store.addTranscriptEvent(event, dedupKey: "codex:\(file.path):\(offset)")
+        let key = "codex:\(file.path):\(offset)"
+        if timestamp >= liveCutoff {
+            store.addTranscriptEvent(event, dedupKey: key)
+        } else if backfilling, timestamp >= backfillFrom, backfillSeen.insert(key).inserted {
+            backfillBatch[UsageStore.dayKey(timestamp), default: DayAgg()].add(event)
+        }
     }
 
     private func window(_ raw: Line.RateLimit?) -> ObservedWindow? {

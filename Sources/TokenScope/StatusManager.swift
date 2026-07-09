@@ -2,10 +2,43 @@ import Foundation
 import SwiftUI
 import Combine
 
-/// Polls Anthropic's public status page (no auth) so the menu can answer
-/// "is it me, or is Claude down?". Surfaces the overall indicator, any
-/// non-operational components, and active incidents, and notifies on change.
+/// Polls a provider's public Statuspage summary (no auth). Claude and OpenAI
+/// use the same Statuspage response shape, so one implementation keeps their
+/// refresh, incident, footer, and notification behavior in lockstep.
 final class StatusManager: ObservableObject {
+    enum Service {
+        case claude
+        case openAI
+
+        var displayName: String {
+            switch self {
+            case .claude: return "Claude"
+            case .openAI: return "OpenAI"
+            }
+        }
+
+        var statusURL: URL {
+            switch self {
+            case .claude: return URL(string: "https://status.claude.com")!
+            case .openAI: return URL(string: "https://status.openai.com")!
+            }
+        }
+
+        var endpoint: URL { statusURL.appendingPathComponent("api/v2/summary.json") }
+        var notificationKey: String {
+            switch self {
+            case .claude: return "status_notifications_enabled"
+            case .openAI: return "openai_status_notifications_enabled"
+            }
+        }
+        var notificationIDPrefix: String {
+            switch self {
+            case .claude: return "claude-status"
+            case .openAI: return "openai-status"
+            }
+        }
+    }
+
     @Published private(set) var indicator = "none"     // none | minor | major | critical
     @Published private(set) var summary = "All systems operational"
     @Published private(set) var degraded: [Component] = []
@@ -16,13 +49,13 @@ final class StatusManager: ObservableObject {
     struct Component: Identifiable { let id: String; let name: String; let status: String }
     struct Incident: Identifiable { let id: String; let name: String; let status: String; let update: String }
 
-    private let endpoint = URL(string: "https://status.claude.com/api/v2/summary.json")!
+    let service: Service
     private var timer: Timer?
-    private static let notifKey = "status_notifications_enabled"
 
-    init() {
-        if UserDefaults.standard.object(forKey: Self.notifKey) != nil {
-            notificationsEnabled = UserDefaults.standard.bool(forKey: Self.notifKey)
+    init(service: Service = .claude) {
+        self.service = service
+        if UserDefaults.standard.object(forKey: service.notificationKey) != nil {
+            notificationsEnabled = UserDefaults.standard.bool(forKey: service.notificationKey)
         }
     }
 
@@ -35,7 +68,7 @@ final class StatusManager: ObservableObject {
 
     func setNotifications(_ on: Bool) {
         notificationsEnabled = on
-        UserDefaults.standard.set(on, forKey: Self.notifKey)
+        UserDefaults.standard.set(on, forKey: service.notificationKey)
     }
 
     var color: Color {
@@ -51,7 +84,7 @@ final class StatusManager: ObservableObject {
     var allOperational: Bool { indicator == "none" && degraded.isEmpty && incidents.isEmpty }
 
     func refresh() {
-        let req = URLRequest(url: endpoint, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 15)
+        let req = URLRequest(url: service.endpoint, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 15)
         URLSession.shared.dataTask(with: req) { [weak self] data, _, _ in
             guard let self, let data else { return }
             self.parse(data)
@@ -97,12 +130,16 @@ final class StatusManager: ObservableObject {
             self.degraded = degradedComps
             self.incidents = incs
             self.lastUpdated = Date()
-            FileLog.log("status: \(ind) — \(desc); degraded=\(degradedComps.count) incidents=\(incs.count)")
+            FileLog.log("\(self.service.displayName) status: \(ind) — \(desc); degraded=\(degradedComps.count) incidents=\(incs.count)")
             if !firstFetch, previous != ind, self.notificationsEnabled {
                 if ind == "none" {
-                    Notifier.post(title: "Claude is back online", body: "All systems operational.", id: "status-none")
+                    Notifier.post(title: "\(self.service.displayName) is back online",
+                                  body: "All systems operational.",
+                                  id: "\(self.service.notificationIDPrefix)-none")
                 } else {
-                    Notifier.post(title: "Claude status: \(desc)", body: "See status.claude.com for details.", id: "status-\(ind)")
+                    Notifier.post(title: "\(self.service.displayName) status: \(desc)",
+                                  body: "See \(self.service.statusURL.host ?? "the status page") for details.",
+                                  id: "\(self.service.notificationIDPrefix)-\(ind)")
                 }
             }
         }

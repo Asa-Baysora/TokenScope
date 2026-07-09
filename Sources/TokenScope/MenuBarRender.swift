@@ -9,16 +9,22 @@ import AppKit
 /// menu-bar appearance (light/dark) by the caller.
 enum MenuBarRender {
     @MainActor
-    static func image(sessionPct: Int?, weeklyPct: Int?, tokens: String?, dark: Bool) -> NSImage {
-        // The 5h/7d labels only earn their space when both gauges are shown and
-        // would otherwise be ambiguous; a lone gauge needs no label.
-        let labelLimits = sessionPct != nil && weeklyPct != nil
+    static func image(sessionPct: Int?, weeklyPct: Int?, chatGPTPrimaryPct: Int?, chatGPTSecondaryPct: Int?, tokens: String?, dark: Bool) -> NSImage {
+        let gauges: [(label: String, pct: Int)] = [
+            sessionPct.map { ("C 5h", $0) },
+            weeklyPct.map { ("C 7d", $0) },
+            chatGPTPrimaryPct.map { ("GPT 5h", $0) },
+            chatGPTSecondaryPct.map { ("GPT 7d", $0) },
+        ].compactMap { $0 }
+        // A lone gauge needs no prefix; multiple windows must be labeled so the
+        // provider and rolling period remain unambiguous in the menu bar.
+        let labelLimits = gauges.count > 1
         var segments: [AnyView] = []
-        if let s = sessionPct {
-            segments.append(AnyView(gaugeItem(fraction: Double(s) / 100, label: labelLimits ? "5h" : nil, pct: s)))
-        }
-        if let w = weeklyPct {
-            segments.append(AnyView(gaugeItem(fraction: Double(w) / 100, label: labelLimits ? "7d" : nil, pct: w)))
+        for gauge in gauges {
+            segments.append(AnyView(gaugeItem(
+                fraction: Double(gauge.pct) / 100,
+                label: labelLimits ? gauge.label : nil,
+                pct: gauge.pct)))
         }
         if let t = tokens {
             segments.append(AnyView(Text(t).font(.system(size: 12, weight: .medium)).monospacedDigit()))

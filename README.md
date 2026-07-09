@@ -2,7 +2,7 @@
 
 macOS menu bar app showing local LLM token usage — per call, per session, per day —
 for **Claude Code**, **Codex**, and **Ollama**, plus optional **claude.ai** and
-experimental **ChatGPT** plan-limit views and Anthropic service status.
+experimental **ChatGPT** plan-limit views plus Claude and OpenAI service status.
 
 ## How it measures
 
@@ -19,7 +19,9 @@ Token usage comes from two independent sources, reconciled automatically:
 2. **Codex session telemetry** (`~/.codex/sessions/**/*.jsonl`). TokenScope reads
    only Codex `token_count` records: input, cached input, output, reasoning-output,
    and the currently observed quota windows. Prompts, replies, and tool payloads are
-   never retained. This covers local Codex app/CLI sessions without a Cookie.
+   never retained. It replays the live 31-day window and backfills up to a year of
+   daily history once, matching Claude Code's heatmap retention. This covers local
+   Codex app/CLI sessions without a Cookie.
 
 3. **Local Ollama proxy** (`127.0.0.1:11435 → 127.0.0.1:11434`). A transparent TCP
    relay that parses token counts out of responses as they stream — Ollama-native,
@@ -43,8 +45,9 @@ Two more panels track things tokens alone don't tell you (features adapted from
    it returns. This is intentionally limits-only: ChatGPT web conversations do not
    provide a reliable local per-chat token transcript. The endpoint may change.
 
-6. **Service status**. Polls Anthropic's public status page so you can tell "is it
-   me, or is Claude down?" — shown in the footer, with optional change alerts.
+6. **Service status**. Polls the public Claude and OpenAI status pages so you can
+   tell whether either provider is degraded — shown in the footer, with optional
+   per-provider change alerts.
 
 ## Build & run
 
@@ -112,8 +115,8 @@ The window separates the two things it measures by **scope**:
 The title-bar headline shows today's local tokens split by source (orange Claude
 Code / purple Codex / blue Ollama) rather than one merged total.
 
-The **footer** (always visible) shows Anthropic service status on the left and the
-proxy on the right. The **menu bar gauge** tints green/yellow/red to your nearest
+The **footer** (always visible) shows Claude and OpenAI service status, each linked
+to its public status page. The **menu bar gauge** tints green/yellow/red to your nearest
 limit (or the service-status color). By default the menu bar shows today's total
 tokens (a live `↓` counter while a call streams through the proxy); enable session
 and/or weekly limit % in Settings to show those too — each colored green < 70%,

@@ -4,8 +4,8 @@ import AppKit
 /// Tabbed layout. A custom (snapshot-renderable) tab bar splits the content into
 /// Now / Usage / History / Settings; within a tab, each section is collapsible
 /// (chevron, persisted) and can be hidden entirely from Settings. The footer
-/// (Anthropic service status, linking to status.claude.com) and the menu-bar
-/// tint are always present; the proxy health + Ollama env live under Settings.
+/// (Claude + OpenAI service status links) and the menu-bar tint are always
+/// present; the proxy health + Ollama env live under Settings.
 ///
 ///   Now      — Limits (nearest rate-limit wall + reset), Live calls, Latest calls
 ///   Usage    — period-scoped chart, source/model totals, sessions
@@ -17,6 +17,7 @@ struct MenuView: View {
     @ObservedObject var openAILimits: OpenAILimitsManager
     @ObservedObject var chatGPTLimits: ChatGPTLimitsManager
     @ObservedObject var status: StatusManager
+    @ObservedObject var openAIStatus: StatusManager
     /// Snapshot mode renders the active tab inline: ScrollView is NSScrollView-
     /// backed on macOS and ImageRenderer can't draw it.
     var snapshotInline = false
@@ -28,6 +29,7 @@ struct MenuView: View {
     @AppStorage("CollapsedSections") private var collapsedRaw = ""
     @AppStorage("HiddenSections") private var hiddenRaw = ""
     @AppStorage("MenuBarItems") private var menuBarItemsRaw = "tokens"
+    @AppStorage("SessionOriginFilter") private var sessionOriginFilterRaw = SessionOriginFilter.all.rawValue
     @State private var cookieDraft = ""
     @State private var chatGPTCookieDraft = ""
     @State private var contentHeight: CGFloat = 360
@@ -43,6 +45,9 @@ struct MenuView: View {
 
     private var period: StatsPeriod { StatsPeriod(rawValue: periodRaw) ?? .today }
     private var activeTab: Tab { Tab(rawValue: activeTabRaw) ?? .now }
+    private var sessionOriginFilter: SessionOriginFilter {
+        SessionOriginFilter(rawValue: sessionOriginFilterRaw) ?? .all
+    }
 
     // Raw value stays "now" (persisted in AppStorage) though it's titled "Activity".
     enum Tab: String, CaseIterable, Identifiable {
@@ -79,6 +84,21 @@ struct MenuView: View {
             case .providers: return "Providers & models"
             case .sessions: return "Sessions"
             case .heatmap: return "Last 6 months"
+            }
+        }
+    }
+
+    enum SessionOriginFilter: String, CaseIterable, Identifiable {
+        case all, claudeCode, codex, ollama
+
+        var id: String { rawValue }
+        var origin: UsageOrigin? { UsageOrigin(rawValue: rawValue) }
+        var label: String {
+            switch self {
+            case .all: return "All"
+            case .claudeCode: return "Claude"
+            case .codex: return "Codex"
+            case .ollama: return "Ollama"
             }
         }
     }
@@ -255,7 +275,9 @@ struct MenuView: View {
 
     private var accountLimitsHeader: some View {
         VStack(alignment: .leading, spacing: 8) {
-            limitsHeader
+            // Cookie-backed account cards stay out of the always-visible area
+            // until configured; Settings remains the explicit connection point.
+            if limits.connected { limitsHeader }
             codexLimitsHeader
             // ChatGPT is web-only and optional. Keep its connection workflow in
             // Settings until a Cookie is present so always-visible account
@@ -271,10 +293,8 @@ struct MenuView: View {
     @ViewBuilder private var limitsHeader: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
-                Text("CLAUDE.AI LIMITS")
+                Text("CLAUDE LIMITS")
                     .font(.system(size: 10, weight: .semibold)).foregroundStyle(.secondary)
-                Text("whole account · web + desktop + Code")
-                    .font(.system(size: 9.5)).foregroundStyle(.tertiary)
                 Spacer()
                 if limits.connected, !limits.windows.isEmpty { refreshButton }
             }
@@ -312,14 +332,16 @@ struct MenuView: View {
     @ViewBuilder private var codexLimitsHeader: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
-                Text("CODEX LIMITS")
+                Text("CHATGPT LIMITS")
                     .font(.system(size: 10, weight: .semibold)).foregroundStyle(.secondary)
-                Text("observed from local Codex sessions")
-                    .font(.system(size: 9.5)).foregroundStyle(.tertiary)
                 Spacer()
-                if let seen = openAILimits.lastUpdated {
-                    Text("seen \(when(seen))").font(.system(size: 9.5)).foregroundStyle(.tertiary)
+                Button { openAILimits.refresh() } label: {
+                    Image(systemName: "arrow.clockwise").font(.system(size: 10, weight: .semibold))
                 }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .disabled(!openAILimits.monitoringEnabled)
+                .help("Refresh limits from local Codex sessions")
             }
             if !openAILimits.monitoringEnabled {
                 Button { activeTabRaw = Tab.settings.rawValue } label: {
@@ -341,10 +363,8 @@ struct MenuView: View {
     @ViewBuilder private var chatGPTLimitsHeader: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
-                Text("CHATGPT LIMITS")
+                Text("CHATGPT WEB LIMITS")
                     .font(.system(size: 10, weight: .semibold)).foregroundStyle(.secondary)
-                Text("experimental web connection")
-                    .font(.system(size: 9.5)).foregroundStyle(.tertiary)
                 Spacer()
                 if chatGPTLimits.connected, !chatGPTLimits.windows.isEmpty {
                     Button { chatGPTLimits.refresh() } label: {
@@ -645,9 +665,17 @@ struct MenuView: View {
 
     @ViewBuilder private var sessionsContent: some View {
         let all = store.sessions(in: period)
-        let sessions = Array(all.prefix(6))
+        let filtered = sessionOriginFilter.origin.map { origin in
+            all.filter { $0.provider == origin }
+        } ?? all
+        let sessions = Array(filtered.prefix(6))
         VStack(alignment: .leading, spacing: 5) {
-            if sessions.isEmpty { emptyNote("No sessions in this period") }
+            sessionOriginFilterBar
+            if sessions.isEmpty {
+                emptyNote(sessionOriginFilter == .all
+                    ? "No sessions in this period"
+                    : "No \(sessionOriginFilter.label) sessions in this period")
+            }
             ForEach(sessions) { s in
                 HStack(alignment: .top, spacing: 7) {
                     Circle().fill(s.isActive ? Color.green : Color.gray.opacity(0.35))
@@ -661,9 +689,32 @@ struct MenuView: View {
                     Text(when(s.lastActivity)).font(.system(size: 10.5)).foregroundStyle(.secondary)
                 }
             }
-            if all.count > sessions.count {
-                Text("+ \(all.count - sessions.count) more sessions")
+            if filtered.count > sessions.count {
+                Text("+ \(filtered.count - sessions.count) more sessions")
                     .font(.system(size: 10.5)).foregroundStyle(.secondary).padding(.leading, 14)
+            }
+        }
+    }
+
+    private var sessionOriginFilterBar: some View {
+        HStack(spacing: 3) {
+            ForEach(SessionOriginFilter.allCases) { filter in
+                let selected = sessionOriginFilter == filter
+                Button { sessionOriginFilterRaw = filter.rawValue } label: {
+                    HStack(spacing: 4) {
+                        if let origin = filter.origin {
+                            Circle().fill(color(origin)).frame(width: 5, height: 5)
+                        }
+                        Text(filter.label).font(.system(size: 10, weight: selected ? .semibold : .regular))
+                    }
+                    .padding(.horizontal, 7).padding(.vertical, 3)
+                    .background(RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(selected ? Color.accentColor.opacity(0.18) : Color.primary.opacity(0.05)))
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(selected ? Color.accentColor : .secondary)
+                .help(filter == .all ? "Show sessions from every local source" : "Show only \(filter.label) sessions")
             }
         }
     }
@@ -816,6 +867,14 @@ struct MenuView: View {
                     Text("Weekly limit %  ").font(.system(size: 11.5))
                     + Text("(7d, needs claude.ai)").font(.system(size: 9.5)).foregroundColor(.secondary)
                 }
+                Toggle(isOn: menuBarBinding("chatgptPrimary")) {
+                    Text("ChatGPT primary limit %  ").font(.system(size: 11.5))
+                    + Text("(local Codex)").font(.system(size: 9.5)).foregroundColor(.secondary)
+                }
+                Toggle(isOn: menuBarBinding("chatgptSecondary")) {
+                    Text("ChatGPT secondary limit %  ").font(.system(size: 11.5))
+                    + Text("(local Codex)").font(.system(size: 9.5)).foregroundColor(.secondary)
+                }
                 Toggle(isOn: menuBarBinding("tokens")) {
                     Text("Daily token count").font(.system(size: 11.5))
                 }
@@ -827,8 +886,12 @@ struct MenuView: View {
                 sectionTitle("Notifications")
                 Toggle("Session/weekly limit thresholds (25/50/75/90%)",
                        isOn: Binding(get: { limits.notificationsEnabled }, set: { limits.setNotifications($0) }))
+                Toggle("ChatGPT limit thresholds (25/50/75/90%)",
+                       isOn: Binding(get: { openAILimits.notificationsEnabled }, set: { openAILimits.setNotifications($0) }))
                 Toggle("Anthropic service status changes",
                        isOn: Binding(get: { status.notificationsEnabled }, set: { status.setNotifications($0) }))
+                Toggle("OpenAI service status changes",
+                       isOn: Binding(get: { openAIStatus.notificationsEnabled }, set: { openAIStatus.setNotifications($0) }))
             }
             .toggleStyle(.checkbox).controlSize(.small).font(.system(size: 11.5))
             VStack(alignment: .leading, spacing: 6) {
@@ -909,21 +972,15 @@ struct MenuView: View {
         }
     }
 
-    // MARK: - Footer (Anthropic service status → status.claude.com link)
+    // MARK: - Footer (Claude + OpenAI status links)
 
     private var footer: some View {
         VStack(alignment: .leading, spacing: 5) {
-            if !status.incidents.isEmpty || !status.degraded.isEmpty {
-                ForEach(status.incidents.prefix(2)) { inc in
-                    Text("⚠︎ \(inc.name)").font(.system(size: 10.5)).foregroundStyle(.orange).lineLimit(1)
-                }
-                ForEach(status.degraded.prefix(3)) { c in
-                    Text("• \(c.name): \(c.status.replacingOccurrences(of: "_", with: " "))")
-                        .font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1)
-                }
-            }
+            serviceIssueRows(status)
+            serviceIssueRows(openAIStatus)
             HStack(spacing: 6) {
-                statusLink
+                statusLink(status)
+                statusLink(openAIStatus)
                 Spacer()
                 Button("Quit") { NSApp.terminate(nil) }
                     .font(.system(size: 11))
@@ -931,19 +988,29 @@ struct MenuView: View {
         }
     }
 
-    /// The service-status row doubles as a link to Anthropic's status page —
-    /// the natural place to go when the dot turns yellow/red. NSWorkspace works
-    /// even where NSApp is nil (snapshot/menubar paths); the button is never hit
-    /// there anyway.
-    private var statusLink: some View {
-        Button {
-            if let url = URL(string: "https://status.claude.com") {
-                NSWorkspace.shared.open(url)
+    @ViewBuilder
+    private func serviceIssueRows(_ service: StatusManager) -> some View {
+        if !service.incidents.isEmpty || !service.degraded.isEmpty {
+            ForEach(service.incidents.prefix(2)) { inc in
+                Text("⚠︎ \(service.service.displayName): \(inc.name)")
+                    .font(.system(size: 10.5)).foregroundStyle(.orange).lineLimit(1)
             }
+            ForEach(service.degraded.prefix(3)) { component in
+                Text("• \(service.service.displayName) \(component.name): \(component.status.replacingOccurrences(of: "_", with: " "))")
+                    .font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1)
+            }
+        }
+    }
+
+    /// Each provider-status row opens its own public status page. NSWorkspace
+    /// also works in headless snapshot paths (where the button is never tapped).
+    private func statusLink(_ service: StatusManager) -> some View {
+        Button {
+            NSWorkspace.shared.open(service.service.statusURL)
         } label: {
             HStack(spacing: 6) {
-                Circle().fill(status.color).frame(width: 7, height: 7)
-                Text(status.allOperational ? "Claude: operational" : status.summary)
+                Circle().fill(service.color).frame(width: 7, height: 7)
+                Text(service.allOperational ? "\(service.service.displayName): operational" : service.summary)
                     .font(.system(size: 10.5)).lineLimit(1)
                 Image(systemName: "arrow.up.forward").font(.system(size: 8, weight: .semibold))
             }
@@ -951,7 +1018,7 @@ struct MenuView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .help("Open status.claude.com")
+        .help("Open \(service.service.statusURL.host ?? "status page")")
     }
 
     private func copyEnv() {

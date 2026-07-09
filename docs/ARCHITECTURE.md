@@ -49,8 +49,10 @@ skipping `<command-…>`/`Caveat:`/meta lines).
 uses the same complete-line and hot-file polling discipline as `TranscriptWatcher`
 but decodes only those records. `last_token_usage` becomes an exact local event;
 cached and reasoning counts are retained as details, not double-counted in the
-headline. `rate_limits.primary` and `secondary` feed the observed Codex quota card.
-No prompt, reply, or tool payload is stored by TokenScope.
+headline. Its separate persisted watermark backfills a ≤366-day gap exactly once
+into the shared history, matching Claude's launch behavior. `rate_limits.primary`
+and `secondary` feed the observed Codex quota card. No prompt, reply, or tool
+payload is stored by TokenScope.
 
 **3. Local proxy** (`OllamaProxy` → `Relay` → `ResponseScanner`). A transparent
 TCP relay `127.0.0.1:11435 → 127.0.0.1:11434`. Bytes pass through unmodified
@@ -91,10 +93,11 @@ adapter using a pasted ChatGPT Cookie header. It recognizes returned percentage,
 duration, and reset concepts without fabricating token totals. It is isolated from
 local telemetry because the web response can change independently.
 
-**7. Service status** (`StatusManager`): polls the public
-`status.claude.com/api/v2/summary.json` (no auth) every 5 min for the overall
-indicator, non-operational components, and active incidents; notifies on
-indicator transitions. Answers "is it me or is Claude down?".
+**7. Service status** (`StatusManager`): polls both public Statuspage summaries —
+`status.claude.com/api/v2/summary.json` and `status.openai.com/api/v2/summary.json`
+(no auth) every 5 min for overall indicators, non-operational components, and
+active incidents; each provider has its own notification preference and status-page
+link.
 
 Notifications go through `Notifier` (UNUserNotificationCenter; gated on a bundle
 identifier so the bare `--snapshot` binary doesn't raise an NSException).
@@ -141,9 +144,9 @@ local-token tabs, and "how close to the wall" is the most actionable glance. The
 tabs are then purely local-token views. A custom (snapshot-renderable) **tab bar**
 splits them into four; within a tab each section is **collapsible** (persisted in
 `CollapsedSections`) and **hideable** from Settings (`HiddenSections`). The footer
-carries Anthropic service status and links to `status.claude.com`; proxy health +
-the Copy-Ollama-env action live in Settings. The menu-bar gauge tints to the
-nearest limit wall.
+carries Claude and OpenAI service status with their respective status-page links;
+proxy health + the Copy-Ollama-env action live in Settings. The menu-bar gauge
+tints to the nearest limit wall.
 
 - **Header (always on, except Settings)** — Limits: per-window bars, % colored by
   the green→yellow→red gradient, reset countdowns, refresh; a connect prompt when

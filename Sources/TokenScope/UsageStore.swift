@@ -15,6 +15,9 @@ final class UsageStore: ObservableObject {
 
     /// All usage before this date is fully captured in `history`.
     private(set) var historyCompleteThrough = Date(timeIntervalSince1970: 0)
+    /// Codex logs are independent from Claude Code transcripts, so their
+    /// one-time historical replay needs its own persisted watermark.
+    private(set) var codexHistoryCompleteThrough = Date(timeIntervalSince1970: 0)
 
     let proxyPort: UInt16
     let upstreamPort: UInt16
@@ -30,6 +33,7 @@ final class UsageStore: ObservableObject {
 
     private struct HistoryFile: Codable {
         var completeThrough: Double
+        var codexCompleteThrough: Double?
         var days: [String: DayAgg]
     }
 
@@ -188,6 +192,21 @@ final class UsageStore: ObservableObject {
         }
     }
 
+    /// Codex uses its own watermark because the source log lives outside the
+    /// Claude transcript tree. Both sources still merge into one day aggregate.
+    func mergeCodexHistorical(_ batch: [String: DayAgg], coverThrough: Date) {
+        DispatchQueue.main.async {
+            for (key, value) in batch {
+                var day = self.history[key] ?? DayAgg()
+                day.merge(value)
+                self.history[key] = day
+            }
+            self.codexHistoryCompleteThrough = max(self.codexHistoryCompleteThrough, coverThrough)
+            self.saveHistory()
+            FileLog.log("Codex history backfill: \(batch.count) days through \(Self.dayKey(coverThrough))")
+        }
+    }
+
     /// Called once the transcript watcher has finished its initial replay: orders the
     /// bulk-loaded events, shadows persisted proxy events that match a transcript
     /// record of the same call (the live matching above only covers runtime arrivals),
@@ -275,11 +294,16 @@ final class UsageStore: ObservableObject {
               let f = try? JSONDecoder().decode(HistoryFile.self, from: data) else { return }
         history = f.days
         historyCompleteThrough = Date(timeIntervalSince1970: f.completeThrough)
-        FileLog.log("loaded daily history: \(f.days.count) days, complete through \(Self.dayKey(historyCompleteThrough))")
+        codexHistoryCompleteThrough = f.codexCompleteThrough.map(Date.init(timeIntervalSince1970:))
+            ?? Date(timeIntervalSince1970: 0)
+        FileLog.log("loaded daily history: \(f.days.count) days, Claude through \(Self.dayKey(historyCompleteThrough)), Codex through \(Self.dayKey(codexHistoryCompleteThrough))")
     }
 
     private func saveHistory() {
-        let f = HistoryFile(completeThrough: historyCompleteThrough.timeIntervalSince1970, days: history)
+        let f = HistoryFile(
+            completeThrough: historyCompleteThrough.timeIntervalSince1970,
+            codexCompleteThrough: codexHistoryCompleteThrough.timeIntervalSince1970,
+            days: history)
         guard let data = try? JSONEncoder().encode(f) else { return }
         ioQueue.async {
             try? FileManager.default.createDirectory(at: Self.supportDir, withIntermediateDirectories: true)

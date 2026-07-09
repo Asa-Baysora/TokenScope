@@ -4,7 +4,7 @@ TokenScope is a macOS menu bar app (SwiftPM, SwiftUI `MenuBarExtra`) that meters
 local LLM token usage — live, per call, per session, per day — for Claude Code
 (native Anthropic or pointed at Ollama), Codex local sessions, and any Ollama
 client routed through its local proxy. It also tracks claude.ai plan limits,
-observed Codex quota windows, experimental ChatGPT web limits, and Anthropic
+observed Codex quota windows, experimental ChatGPT web limits, and Claude/OpenAI
 service status. See
 `docs/ARCHITECTURE.md` for the full design.
 
@@ -119,7 +119,8 @@ Idle CPU must stay near zero. Measured regressions that were fixed; don't undo:
   Deleting it triggers a fresh one-time backfill (≤366 days) on next launch.
 - Codex raw session logs remain in `~/.codex/sessions/**/*.jsonl`; TokenScope
   reads only `session_meta` and `token_count` records, then retains the same
-  31-day event window and permanent day aggregates as other local sources.
+  31-day event window and permanent day aggregates as other local sources. Its
+  own persisted watermark drives the one-time ≤366-day history backfill.
 - `~/Library/Logs/TokenScope.log` — every ingested event and lifecycle step;
   first place to look when verifying behavior.
 - Ports via `defaults write com.baysora.tokenscope ProxyPort|OllamaPort -int N`

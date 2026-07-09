@@ -13,6 +13,7 @@ final class AppServices {
     let openAILimits: OpenAILimitsManager
     let chatGPTLimits: ChatGPTLimitsManager
     let status: StatusManager
+    let openAIStatus: StatusManager
     let appearance: AppearanceWatcher
 
     private init() {
@@ -26,6 +27,7 @@ final class AppServices {
         limits = LimitsManager()
         chatGPTLimits = ChatGPTLimitsManager()
         status = StatusManager()
+        openAIStatus = StatusManager(service: .openAI)
         appearance = AppearanceWatcher()
         Notifier.requestAuthorization()
         watcher.start()
@@ -35,6 +37,7 @@ final class AppServices {
         limits.start()
         chatGPTLimits.start()
         status.start()
+        openAIStatus.start()
         FileLog.log("TokenScope started")
     }
 }
@@ -52,14 +55,15 @@ struct TokenScopeApp: App {
     @StateObject private var openAILimits = AppServices.shared.openAILimits
     @StateObject private var chatGPTLimits = AppServices.shared.chatGPTLimits
     @StateObject private var status = AppServices.shared.status
+    @StateObject private var openAIStatus = AppServices.shared.openAIStatus
     @StateObject private var appearance = AppServices.shared.appearance
-    // Which fields the menu bar shows: any of session,weekly,tokens.
+    // Which fields the menu bar shows: any Claude/ChatGPT limit window plus tokens.
     @AppStorage("MenuBarItems") private var menuBarItemsRaw = "tokens"
 
     var body: some Scene {
         MenuBarExtra {
             MenuView(store: store, limits: limits, openAILimits: openAILimits,
-                     chatGPTLimits: chatGPTLimits, status: status)
+                     chatGPTLimits: chatGPTLimits, status: status, openAIStatus: openAIStatus)
         } label: {
             // ONE image — the menu bar reliably renders a single Image but drops
             // elements from a multi-part label and strips text color.
@@ -76,10 +80,15 @@ struct TokenScopeApp: App {
         let items = menuBarItemsRaw.split(separator: ",").map(String.init)
         let session = items.contains("session") ? limits.sessionPercent : nil
         let weekly = items.contains("weekly") ? limits.weeklyPercent : nil
-        let wantTokens = items.contains("tokens") || (session == nil && weekly == nil)
+        let chatGPTPrimary = items.contains("chatgptPrimary") ? openAILimits.primaryPercent : nil
+        let chatGPTSecondary = items.contains("chatgptSecondary") ? openAILimits.secondaryPercent : nil
+        let wantTokens = items.contains("tokens") || (session == nil && weekly == nil
+            && chatGPTPrimary == nil && chatGPTSecondary == nil)
         return MenuBarRender.image(
             sessionPct: session,
             weeklyPct: weekly,
+            chatGPTPrimaryPct: chatGPTPrimary,
+            chatGPTSecondaryPct: chatGPTSecondary,
             tokens: wantTokens ? store.menuTitle : nil,
             dark: appearance.dark)
     }
@@ -130,9 +139,9 @@ enum Main {
     private static func dumpMenuBar(path: String) {
         // Several selections stacked, to verify separators and the both-on labels.
         let cases: [NSImage] = [
-            MenuBarRender.image(sessionPct: 28, weeklyPct: nil, tokens: nil, dark: true),
-            MenuBarRender.image(sessionPct: 28, weeklyPct: nil, tokens: "2.85M", dark: true),
-            MenuBarRender.image(sessionPct: 28, weeklyPct: 21, tokens: "2.85M", dark: true),
+            MenuBarRender.image(sessionPct: 28, weeklyPct: nil, chatGPTPrimaryPct: nil, chatGPTSecondaryPct: nil, tokens: nil, dark: true),
+            MenuBarRender.image(sessionPct: 28, weeklyPct: nil, chatGPTPrimaryPct: nil, chatGPTSecondaryPct: nil, tokens: "2.85M", dark: true),
+            MenuBarRender.image(sessionPct: 28, weeklyPct: 21, chatGPTPrimaryPct: 48, chatGPTSecondaryPct: 7, tokens: "2.85M", dark: true),
         ]
         let scale: CGFloat = 6
         let rowH = (cases.map(\.size.height).max() ?? 16) * scale

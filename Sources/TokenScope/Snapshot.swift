@@ -21,7 +21,8 @@ enum Snapshot {
         let view = MenuView(store: services.store, limits: services.limits,
                             openAILimits: services.openAILimits,
                             chatGPTLimits: services.chatGPTLimits,
-                            status: services.status, snapshotInline: true)
+                            status: services.status, openAIStatus: services.openAIStatus,
+                            snapshotInline: true)
         let renderer = ImageRenderer(content: view)
         renderer.scale = 2
         guard let img = renderer.nsImage,
