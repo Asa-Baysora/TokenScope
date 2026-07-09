@@ -26,6 +26,9 @@ struct MenuView: View {
     @AppStorage("StatsPeriod") private var periodRaw = StatsPeriod.today.rawValue
     @AppStorage("BarChartStyle") private var barStyleRaw = "stacked"
     @AppStorage("HideWeekends") private var hideWeekends = false
+    // Cache reads/writes are most of the real context volume, so the chart
+    // counts them by default; Settings can drop them for an in/out-only view.
+    @AppStorage("ChartIncludeCache") private var chartIncludeCache = true
     @AppStorage("CollapsedSections") private var collapsedRaw = ""
     @AppStorage("HiddenSections") private var hiddenRaw = ""
     @AppStorage("MenuBarItems") private var menuBarItemsRaw = "tokens"
@@ -172,8 +175,8 @@ struct MenuView: View {
     }
 
     private func providerTotalChip(_ p: UsageOrigin, _ total: Int) -> some View {
-        HStack(spacing: 3) {
-            Circle().fill(color(p)).frame(width: 6, height: 6)
+        HStack(spacing: 3.5) {
+            BrandMarkView(origin: p, size: 11)
             Text(Fmt.compact(total)).font(.system(size: 11)).foregroundStyle(.secondary)
         }
         .help("\(p.displayName) tokens today (input + output)")
@@ -332,7 +335,7 @@ struct MenuView: View {
     @ViewBuilder private var codexLimitsHeader: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
-                Text("CHATGPT LIMITS")
+                Text("CODEX LIMITS")
                     .font(.system(size: 10, weight: .semibold)).foregroundStyle(.secondary)
                 Spacer()
                 Button { openAILimits.refresh() } label: {
@@ -366,22 +369,28 @@ struct MenuView: View {
                 Text("CHATGPT WEB LIMITS")
                     .font(.system(size: 10, weight: .semibold)).foregroundStyle(.secondary)
                 Spacer()
-                if chatGPTLimits.connected, !chatGPTLimits.windows.isEmpty {
-                    Button { chatGPTLimits.refresh() } label: {
-                        Image(systemName: "arrow.clockwise").font(.system(size: 10, weight: .semibold))
-                    }
-                    .buttonStyle(.plain).foregroundStyle(.secondary)
-                }
+                if chatGPTLimits.connected, !chatGPTLimits.windows.isEmpty { chatGPTRefreshButton }
             }
             if !chatGPTLimits.connected {
                 Button { activeTabRaw = Tab.settings.rawValue; chatGPTCookieDraft = "" } label: {
                     Text("Connect ChatGPT to track web limits").font(.system(size: 11.5))
                 }
                 .buttonStyle(.plain).foregroundStyle(.blue)
-            } else if let error = chatGPTLimits.errorMessage {
-                Text(error).font(.system(size: 11)).foregroundStyle(.secondary)
+            } else if let error = chatGPTLimits.errorMessage, chatGPTLimits.windows.isEmpty {
+                // Only surface the error when there's nothing to show. A transient
+                // poll failure must not blank limits already fetched — keep the
+                // last-good windows and let the refresh button retry.
+                HStack(spacing: 6) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 10)).foregroundStyle(.orange)
+                    Text(error).font(.system(size: 11)).foregroundStyle(.secondary)
+                    chatGPTRefreshButton
+                }
             } else if chatGPTLimits.windows.isEmpty {
-                Text("Loading ChatGPT limits…").font(.system(size: 11)).foregroundStyle(.secondary)
+                HStack(spacing: 6) {
+                    Text("Loading ChatGPT limits…").font(.system(size: 11)).foregroundStyle(.secondary)
+                    chatGPTRefreshButton
+                }
             } else {
                 ForEach(chatGPTLimits.windows) { limitRow($0) }
             }
@@ -398,6 +407,15 @@ struct MenuView: View {
         .buttonStyle(.plain)
         .foregroundStyle(.secondary)
         .help("Refresh limit usage now")
+    }
+
+    private var chatGPTRefreshButton: some View {
+        Button { chatGPTLimits.refresh() } label: {
+            Image(systemName: "arrow.clockwise").font(.system(size: 10, weight: .semibold))
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(.secondary)
+        .help("Refresh ChatGPT web limits now")
     }
 
     private func limitRow(_ w: LimitWindow) -> some View {
@@ -466,7 +484,7 @@ struct MenuView: View {
                 HStack(spacing: 7) {
                     Text(when(e.timestamp))
                         .font(.system(size: 10.5)).foregroundStyle(.secondary).monospacedDigit()
-                    Circle().fill(color(e.provider)).frame(width: 6, height: 6)
+                    BrandMarkView(origin: e.provider, size: 12)
                     Text(e.model).font(.system(size: 11.5)).lineLimit(1)
                     Spacer()
                     Text(callDetail(e)).font(.system(size: 11)).monospacedDigit()
@@ -493,7 +511,7 @@ struct MenuView: View {
                 .controlSize(.small)
                 Spacer()
             }
-            Text("Local tokens observed on this Mac: Claude Code, Codex, and Ollama (excludes web/desktop ChatGPT and claude.ai).")
+            Text("Local tokens observed on this Mac: Claude, Codex, and Ollama (excludes web/desktop ChatGPT and claude.ai).")
                 .font(.system(size: 9.5)).foregroundStyle(.tertiary)
                 .fixedSize(horizontal: false, vertical: true)
             section(.chart) { chartBlock }
@@ -510,7 +528,9 @@ struct MenuView: View {
     }
 
     private var chartBlock: some View {
-        let allBars = period == .today ? store.hourlyTotals() : store.dailyTotals(in: period)
+        let allBars = period == .today
+            ? store.hourlyTotals(includeCache: chartIncludeCache)
+            : store.dailyTotals(in: period, includeCache: chartIncludeCache)
         let bars = (hideWeekends && period != .today)
             ? allBars.filter { !Calendar.current.isDateInWeekend($0.day) }
             : allBars
@@ -525,8 +545,11 @@ struct MenuView: View {
         let pastTotals = bars.filter { $0.day <= now }.map(\.total)
         return VStack(alignment: .leading, spacing: 3) {
             HStack(spacing: 10) {
-                Text(period == .today ? "per hour" : "per day")
+                Text((period == .today ? "per hour" : "per day") + (chartIncludeCache ? " · incl. cache" : ""))
                     .font(.system(size: 10, weight: .medium)).foregroundStyle(.secondary)
+                    .help(chartIncludeCache
+                        ? "Bars include prompt-cache reads and writes — the context each call actually processed. Turn off in Settings."
+                        : "Bars show fresh input + output only (cache excluded). Turn on in Settings.")
                 Spacer()
                 if period != .today {
                     Toggle("Hide weekends", isOn: $hideWeekends)
@@ -576,7 +599,8 @@ struct MenuView: View {
 
     private func chartHelp(_ d: DayStat) -> String {
         let label = period == .today ? Self.hourFmt.string(from: d.day) : Self.dayFmt.string(from: d.day)
-        return "\(label): Claude \(Fmt.compact(d.claude)) · Codex \(Fmt.compact(d.codex)) · Ollama \(Fmt.compact(d.ollama))"
+        let suffix = chartIncludeCache ? " (incl. cache)" : ""
+        return "\(label): Claude \(Fmt.compact(d.claude)) · Codex \(Fmt.compact(d.codex)) · Ollama \(Fmt.compact(d.ollama))\(suffix)"
     }
 
     private func leadingEdgeLabel(_ bars: [DayStat]) -> String {
@@ -644,7 +668,7 @@ struct MenuView: View {
     private func providerRow(_ p: UsageOrigin) -> some View {
         let t = store.totals(for: p, in: period)
         return HStack(spacing: 6) {
-            Circle().fill(color(p)).frame(width: 7, height: 7)
+            BrandMarkView(origin: p, size: 14)
             Text(p.displayName).font(.system(size: 12, weight: .medium)).frame(width: 52, alignment: .leading)
             if t.calls == 0 {
                 Text("—").font(.system(size: 12)).foregroundStyle(.secondary)
@@ -703,7 +727,7 @@ struct MenuView: View {
                 Button { sessionOriginFilterRaw = filter.rawValue } label: {
                     HStack(spacing: 4) {
                         if let origin = filter.origin {
-                            Circle().fill(color(origin)).frame(width: 5, height: 5)
+                            BrandMarkView(origin: origin, size: 11)
                         }
                         Text(filter.label).font(.system(size: 10, weight: selected ? .semibold : .regular))
                     }
@@ -746,7 +770,7 @@ struct MenuView: View {
 
     @ViewBuilder private var heatmapContent: some View {
         let weeks = 26
-        let cells = store.heatmapDays(weeks: weeks)
+        let cells = store.heatmapDays(weeks: weeks, includeCache: chartIncludeCache)
         let today = Calendar.current.startOfDay(for: Date())
         let maxV = max(cells.map(\.total).max() ?? 0, 1)
         if cells.count == weeks * 7 {
@@ -762,12 +786,10 @@ struct MenuView: View {
                     }
                 }
                 HStack(spacing: 5) {
-                    Circle().fill(Color(red: 0.96, green: 0.58, blue: 0.20)).frame(width: 6, height: 6)
-                    Text("Claude Code").font(.system(size: 9.5)).foregroundStyle(.secondary)
-                    Circle().fill(Color.purple).frame(width: 6, height: 6)
-                    Text("Codex").font(.system(size: 9.5)).foregroundStyle(.secondary)
-                    Circle().fill(Color(red: 0.35, green: 0.62, blue: 0.98)).frame(width: 6, height: 6)
-                    Text("Ollama").font(.system(size: 9.5)).foregroundStyle(.secondary)
+                    ForEach(UsageOrigin.allCases, id: \.rawValue) { origin in
+                        BrandMarkView(origin: origin, size: 11, tint: Self.heatHue(origin))
+                        Text(origin.displayName).font(.system(size: 9.5)).foregroundStyle(.secondary)
+                    }
                     Text("· hue = dominant source · darker = more")
                         .font(.system(size: 9.5)).foregroundStyle(.secondary)
                 }
@@ -804,7 +826,7 @@ struct MenuView: View {
         return RoundedRectangle(cornerRadius: 3)
             .fill(future ? Color.clear : heatColor(d, maxV))
             .frame(width: 13, height: 13)
-            .help(future ? "" : "\(Self.dayFmt.string(from: d.day)): \(Fmt.compact(d.total)) tokens (Claude Code \(Fmt.compact(d.claude)) · Codex \(Fmt.compact(d.codex)) · Ollama \(Fmt.compact(d.ollama)))")
+            .help(future ? "" : "\(Self.dayFmt.string(from: d.day)): \(Fmt.compact(d.total)) tokens (Claude \(Fmt.compact(d.claude)) · Codex \(Fmt.compact(d.codex)) · Ollama \(Fmt.compact(d.ollama)))\(chartIncludeCache ? " · incl. cache" : "")")
     }
 
     private func heatColor(_ d: DayStat, _ maxV: Int) -> Color {
@@ -812,17 +834,23 @@ struct MenuView: View {
         // A three-way RGB blend turns into ambiguous mud. Use the dominant
         // local source for hue and retain volume in opacity; the tooltip has
         // the exact source breakdown.
-        let hue: Color
-        if d.claude >= d.codex && d.claude >= d.ollama {
-            hue = Color(red: 0.96, green: 0.58, blue: 0.20)
-        } else if d.codex >= d.ollama {
-            hue = .purple
-        } else {
-            hue = Color(red: 0.35, green: 0.62, blue: 0.98)
-        }
+        let dominant: UsageOrigin = (d.claude >= d.codex && d.claude >= d.ollama)
+            ? .claudeCode
+            : (d.codex >= d.ollama ? .codex : .ollama)
         let t = Double(d.total) / Double(maxV)
         let alpha: Double = t <= 0.25 ? 0.35 : (t <= 0.5 ? 0.55 : (t <= 0.75 ? 0.78 : 1.0))
-        return hue.opacity(alpha)
+        return Self.heatHue(dominant).opacity(alpha)
+    }
+
+    /// Heatmap hue per source — deliberately richer than the flat accent colors
+    /// (`BrandMark.color`) so the cells read well at low opacity. Shared with the
+    /// legend marks so the key matches the cells exactly.
+    private static func heatHue(_ o: UsageOrigin) -> Color {
+        switch o {
+        case .claudeCode: return Color(red: 0.96, green: 0.58, blue: 0.20)
+        case .codex:      return .purple
+        case .ollama:     return Color(red: 0.35, green: 0.62, blue: 0.98)
+        }
     }
 
     // MARK: - Settings tab
@@ -868,11 +896,11 @@ struct MenuView: View {
                     + Text("(7d, needs claude.ai)").font(.system(size: 9.5)).foregroundColor(.secondary)
                 }
                 Toggle(isOn: menuBarBinding("chatgptPrimary")) {
-                    Text("ChatGPT primary limit %  ").font(.system(size: 11.5))
+                    Text("Codex primary limit %  ").font(.system(size: 11.5))
                     + Text("(local Codex)").font(.system(size: 9.5)).foregroundColor(.secondary)
                 }
                 Toggle(isOn: menuBarBinding("chatgptSecondary")) {
-                    Text("ChatGPT secondary limit %  ").font(.system(size: 11.5))
+                    Text("Codex secondary limit %  ").font(.system(size: 11.5))
                     + Text("(local Codex)").font(.system(size: 9.5)).foregroundColor(.secondary)
                 }
                 Toggle(isOn: menuBarBinding("tokens")) {
@@ -886,7 +914,7 @@ struct MenuView: View {
                 sectionTitle("Notifications")
                 Toggle("Session/weekly limit thresholds (25/50/75/90%)",
                        isOn: Binding(get: { limits.notificationsEnabled }, set: { limits.setNotifications($0) }))
-                Toggle("ChatGPT limit thresholds (25/50/75/90%)",
+                Toggle("Codex limit thresholds (25/50/75/90%)",
                        isOn: Binding(get: { openAILimits.notificationsEnabled }, set: { openAILimits.setNotifications($0) }))
                 Toggle("Anthropic service status changes",
                        isOn: Binding(get: { status.notificationsEnabled }, set: { status.setNotifications($0) }))
@@ -947,6 +975,15 @@ struct MenuView: View {
                         .help("Copies the env vars that point Claude Code at Ollama through the proxy")
                 }
             }
+            VStack(alignment: .leading, spacing: 5) {
+                sectionTitle("Usage chart")
+                Toggle("Include cached tokens in chart bars", isOn: $chartIncludeCache)
+                    .font(.system(size: 11.5))
+                Text("Cache reads/writes are context the model actually processed each call and usually dwarf fresh input. Off = fresh input + output only.")
+                    .font(.system(size: 9.5)).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .toggleStyle(.checkbox).controlSize(.small)
             VStack(alignment: .leading, spacing: 5) {
                 sectionTitle("Show sections")
                 ForEach(AppSection.allCases) { s in
@@ -1072,13 +1109,6 @@ struct MenuView: View {
         Text(t).font(.system(size: 11)).foregroundStyle(.secondary)
     }
 
-    private func color(_ p: UsageOrigin) -> Color {
-        switch p {
-        case .claudeCode: return .orange
-        case .codex: return .purple
-        case .ollama: return .blue
-        }
-    }
 }
 
 /// Dashed trend curve over the chart's daily/hourly totals, fitted with

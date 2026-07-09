@@ -10,20 +10,22 @@ import AppKit
 enum MenuBarRender {
     @MainActor
     static func image(sessionPct: Int?, weeklyPct: Int?, chatGPTPrimaryPct: Int?, chatGPTSecondaryPct: Int?, tokens: String?, dark: Bool) -> NSImage {
-        let gauges: [(label: String, pct: Int)] = [
-            sessionPct.map { ("C 5h", $0) },
-            weeklyPct.map { ("C 7d", $0) },
-            chatGPTPrimaryPct.map { ("GPT 5h", $0) },
-            chatGPTSecondaryPct.map { ("GPT 7d", $0) },
+        let gauges: [(origin: UsageOrigin, period: String, pct: Int)] = [
+            sessionPct.map { (.claudeCode, "5h", $0) },
+            weeklyPct.map { (.claudeCode, "7d", $0) },
+            chatGPTPrimaryPct.map { (.codex, "5h", $0) },
+            chatGPTSecondaryPct.map { (.codex, "7d", $0) },
         ].compactMap { $0 }
-        // A lone gauge needs no prefix; multiple windows must be labeled so the
-        // provider and rolling period remain unambiguous in the menu bar.
-        let labelLimits = gauges.count > 1
+        // The brand mark always identifies the provider; the rolling-period text
+        // ("5h"/"7d") is only needed to disambiguate when more than one window
+        // is shown (e.g. Claude session + weekly, which share a mark).
+        let labelPeriod = gauges.count > 1
         var segments: [AnyView] = []
         for gauge in gauges {
             segments.append(AnyView(gaugeItem(
+                origin: gauge.origin,
                 fraction: Double(gauge.pct) / 100,
-                label: labelLimits ? gauge.label : nil,
+                period: labelPeriod ? gauge.period : nil,
                 pct: gauge.pct)))
         }
         if let t = tokens {
@@ -51,10 +53,11 @@ enum MenuBarRender {
     }
 
     @ViewBuilder
-    private static func gaugeItem(fraction: Double, label: String?, pct: Int) -> some View {
+    private static func gaugeItem(origin: UsageOrigin, fraction: Double, period: String?, pct: Int) -> some View {
         HStack(spacing: 3) {
             Image(nsImage: MenuBarGauge.image(fraction: fraction))
-            Text(label.map { "\($0) \(pct)%" } ?? "\(pct)%")
+            BrandMarkView(origin: origin, size: 11)
+            Text(period.map { "\($0) \(pct)%" } ?? "\(pct)%")
                 .font(.system(size: 12, weight: .medium)).monospacedDigit()
         }
     }

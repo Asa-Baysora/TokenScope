@@ -16,7 +16,7 @@ enum UsageOrigin: String, CaseIterable {
 
     var displayName: String {
         switch self {
-        case .claudeCode: return "Claude Code"
+        case .claudeCode: return "Claude"
         case .codex: return "Codex"
         case .ollama: return "Ollama"
         }
@@ -131,10 +131,13 @@ struct DayStat: Identifiable {
 struct DayAgg: Codable, Equatable {
     var claudeIn = 0
     var claudeOut = 0
+    var claudeCache = 0
     var codexIn = 0
     var codexOut = 0
+    var codexCache = 0
     var ollamaIn = 0
     var ollamaOut = 0
+    var ollamaCache = 0
     var calls = 0
 
     var claude: Int { claudeIn + claudeOut }
@@ -142,10 +145,22 @@ struct DayAgg: Codable, Equatable {
     var ollama: Int { ollamaIn + ollamaOut }
     var total: Int { claude + codex + ollama }
 
-    /// Older history files predate Codex. Decode absent Codex keys as zero so
-    /// users keep their accumulated Claude/Ollama heatmap data after upgrade.
+    // Cache-inclusive variants for long-range views (heatmap) so they can
+    // honor the same "include cache" setting the bar chart uses. Days frozen
+    // before cache tracking existed have *Cache == 0, so these equal the
+    // fresh-only figures for them — old history degrades gracefully.
+    var claudeWithCache: Int { claude + claudeCache }
+    var codexWithCache: Int { codex + codexCache }
+    var ollamaWithCache: Int { ollama + ollamaCache }
+
+    /// Older history files predate Codex (and, later, cache fields). Decode
+    /// absent keys as zero so users keep their accumulated heatmap data across
+    /// upgrades — a missing cache field just means "no cache recorded that day".
     enum CodingKeys: String, CodingKey {
-        case claudeIn, claudeOut, codexIn, codexOut, ollamaIn, ollamaOut, calls
+        case claudeIn, claudeOut, claudeCache
+        case codexIn, codexOut, codexCache
+        case ollamaIn, ollamaOut, ollamaCache
+        case calls
     }
 
     init() {}
@@ -154,24 +169,31 @@ struct DayAgg: Codable, Equatable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         claudeIn = try c.decodeIfPresent(Int.self, forKey: .claudeIn) ?? 0
         claudeOut = try c.decodeIfPresent(Int.self, forKey: .claudeOut) ?? 0
+        claudeCache = try c.decodeIfPresent(Int.self, forKey: .claudeCache) ?? 0
         codexIn = try c.decodeIfPresent(Int.self, forKey: .codexIn) ?? 0
         codexOut = try c.decodeIfPresent(Int.self, forKey: .codexOut) ?? 0
+        codexCache = try c.decodeIfPresent(Int.self, forKey: .codexCache) ?? 0
         ollamaIn = try c.decodeIfPresent(Int.self, forKey: .ollamaIn) ?? 0
         ollamaOut = try c.decodeIfPresent(Int.self, forKey: .ollamaOut) ?? 0
+        ollamaCache = try c.decodeIfPresent(Int.self, forKey: .ollamaCache) ?? 0
         calls = try c.decodeIfPresent(Int.self, forKey: .calls) ?? 0
     }
 
     mutating func add(_ e: UsageEvent) {
+        let cache = e.cacheReadTokens + e.cacheCreationTokens
         switch e.provider {
         case .claudeCode:
             claudeIn += e.inputTokens
             claudeOut += e.outputTokens
+            claudeCache += cache
         case .codex:
             codexIn += e.inputTokens
             codexOut += e.outputTokens
+            codexCache += cache
         case .ollama:
             ollamaIn += e.inputTokens
             ollamaOut += e.outputTokens
+            ollamaCache += cache
         }
         calls += 1
     }
@@ -179,10 +201,13 @@ struct DayAgg: Codable, Equatable {
     mutating func merge(_ o: DayAgg) {
         claudeIn += o.claudeIn
         claudeOut += o.claudeOut
+        claudeCache += o.claudeCache
         codexIn += o.codexIn
         codexOut += o.codexOut
+        codexCache += o.codexCache
         ollamaIn += o.ollamaIn
         ollamaOut += o.ollamaOut
+        ollamaCache += o.ollamaCache
         calls += o.calls
     }
 }

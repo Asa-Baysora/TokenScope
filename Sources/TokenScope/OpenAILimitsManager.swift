@@ -69,7 +69,7 @@ final class OpenAILimitsManager: ObservableObject {
                 guard let window else { return nil }
                 return LimitWindow(
                     id: "codex-\(kind)",
-                    label: "ChatGPT · \(Self.duration(window.minutes))",
+                    label: "Codex · \(Self.duration(window.minutes))",
                     utilization: window.percent,
                     resetsAt: window.resetsAt)
             }
@@ -83,14 +83,14 @@ final class OpenAILimitsManager: ObservableObject {
         if let primary = windows.first(where: { $0.id == "codex-primary" }),
            let threshold = primaryThreshold.evaluate(percent: Int(primary.utilization)) {
             Notifier.post(title: primary.label + " limit " + String(threshold) + "%",
-                          body: "You've used " + String(Int(primary.utilization)) + "% of this ChatGPT limit.",
-                          id: "chatgpt-limit-primary-" + String(threshold))
+                          body: "You've used " + String(Int(primary.utilization)) + "% of this Codex limit.",
+                          id: "codex-limit-primary-" + String(threshold))
         }
         if let secondary = windows.first(where: { $0.id == "codex-secondary" }),
            let threshold = secondaryThreshold.evaluate(percent: Int(secondary.utilization)) {
             Notifier.post(title: secondary.label + " limit " + String(threshold) + "%",
-                          body: "You've used " + String(Int(secondary.utilization)) + "% of this ChatGPT limit.",
-                          id: "chatgpt-limit-secondary-" + String(threshold))
+                          body: "You've used " + String(Int(secondary.utilization)) + "% of this Codex limit.",
+                          id: "codex-limit-secondary-" + String(threshold))
         }
     }
 

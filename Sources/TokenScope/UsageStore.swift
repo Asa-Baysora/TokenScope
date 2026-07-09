@@ -416,14 +416,22 @@ final class UsageStore: ObservableObject {
         return by.values.sorted { $0.lastActivity > $1.lastActivity }
     }
 
-    func dailyTotals(in period: StatsPeriod) -> [DayStat] {
+    /// Chart tokens for one event. Cache reads/writes are context actually
+    /// processed per call (and usually dwarf fresh input), so the chart counts
+    /// them by default; the Settings toggle drops them for a billing-ish view.
+    private func chartTokens(_ e: UsageEvent, includeCache: Bool) -> Int {
+        e.inputTokens + e.outputTokens
+            + (includeCache ? e.cacheReadTokens + e.cacheCreationTokens : 0)
+    }
+
+    func dailyTotals(in period: StatsPeriod, includeCache: Bool) -> [DayStat] {
         let cal = Calendar.current
         let today = cal.startOfDay(for: Date())
         var by: [Date: DayStat] = [:]
         for e in events(in: period) {
             let day = cal.startOfDay(for: e.timestamp)
             var stat = by[day] ?? DayStat(day: day)
-            let tokens = e.inputTokens + e.outputTokens
+            let tokens = chartTokens(e, includeCache: includeCache)
             switch e.provider {
             case .claudeCode: stat.claude += tokens
             case .codex: stat.codex += tokens
@@ -439,13 +447,13 @@ final class UsageStore: ObservableObject {
 
     /// Today's usage bucketed by hour (24 slots keyed by hour-start dates), so the
     /// Today chart has the same shape as the daily charts.
-    func hourlyTotals() -> [DayStat] {
+    func hourlyTotals(includeCache: Bool) -> [DayStat] {
         let dayStart = Calendar.current.startOfDay(for: Date())
         var out = (0..<24).map { DayStat(day: dayStart.addingTimeInterval(Double($0) * 3600)) }
         for e in events(in: .today) {
             let h = Int(e.timestamp.timeIntervalSince(dayStart) / 3600)
             guard (0..<24).contains(h) else { continue }
-            let tokens = e.inputTokens + e.outputTokens
+            let tokens = chartTokens(e, includeCache: includeCache)
             switch e.provider {
             case .claudeCode: out[h].claude += tokens
             case .codex: out[h].codex += tokens
@@ -458,7 +466,7 @@ final class UsageStore: ObservableObject {
     /// Grid data for the activity heatmap: `weeks * 7` consecutive days, oldest
     /// first, aligned so the last column is the current (possibly partial) week.
     /// Per-day totals = frozen history + whatever is still in the live window.
-    func heatmapDays(weeks: Int) -> [DayStat] {
+    func heatmapDays(weeks: Int, includeCache: Bool) -> [DayStat] {
         let cal = Calendar.current
         let today = cal.startOfDay(for: Date())
         guard let thisWeekStart = cal.dateInterval(of: .weekOfYear, for: today)?.start,
@@ -470,7 +478,7 @@ final class UsageStore: ObservableObject {
             let day = cal.startOfDay(for: e.timestamp)
             let k = Self.dayKey(day)
             var stat = window[k] ?? DayStat(day: day)
-            let tokens = e.inputTokens + e.outputTokens
+            let tokens = chartTokens(e, includeCache: includeCache)
             switch e.provider {
             case .claudeCode: stat.claude += tokens
             case .codex: stat.codex += tokens
@@ -486,9 +494,9 @@ final class UsageStore: ObservableObject {
             let k = Self.dayKey(day)
             var stat = window[k] ?? DayStat(day: day)
             if let h = history[k] {
-                stat.claude += h.claude
-                stat.codex += h.codex
-                stat.ollama += h.ollama
+                stat.claude += includeCache ? h.claudeWithCache : h.claude
+                stat.codex += includeCache ? h.codexWithCache : h.codex
+                stat.ollama += includeCache ? h.ollamaWithCache : h.ollama
             }
             out.append(stat)
         }

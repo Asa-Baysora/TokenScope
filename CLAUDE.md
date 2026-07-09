@@ -20,7 +20,7 @@ swift build -c release                       # compile
 # VERIFY UI BEFORE INSTALLING — render the menu with real data:
 .build/release/TokenScope --snapshot /tmp/menu.png
 SNAPSHOT_PERIOD=month SNAPSHOT_HIDE_WEEKENDS=1 .build/release/TokenScope --snapshot /tmp/menu-30d.png
-# SNAPSHOT_PERIOD=today|week|month, SNAPSHOT_HIDE_WEEKENDS=0|1, SNAPSHOT_BAR_STYLE=stacked|grouped
+# SNAPSHOT_PERIOD=today|week|month, SNAPSHOT_HIDE_WEEKENDS=0|1, SNAPSHOT_BAR_STYLE=stacked|grouped, SNAPSHOT_INCLUDE_CACHE=0|1
 
 # install (the login item points at /Applications — ALWAYS re-ditto after rebuild):
 pkill -x TokenScope; ./build-app.sh
@@ -84,6 +84,22 @@ reason (`MenuView(snapshotInline: true)`).
 - **Verify the menu bar with `screencapture`**, not snapshots (the bar isn't in
   the popup): `screencapture -x` full screen, then crop the top-right strip.
   `--menubar <png>` dumps the composited label offline for a quick check.
+  (`screencapture` needs Screen Recording permission; in headless/sandboxed
+  runs it writes nothing — fall back to `--menubar`, which uses the identical
+  `MenuBarRender.image` path the live bar does.)
+- **Provider brand marks** (`BrandMark`/`BrandMarkView`) identify Claude / Codex
+  / Ollama everywhere a provider appears (menu-bar gauges, provider rows, session
+  filter, heatmap legend, title chips) — one source of truth for the mark and its
+  accent color (`BrandMark.color`). They're base64-embedded alpha-mask PNGs, NOT
+  bundled resources: `Bundle.module` is unreliable in the bare `--snapshot`/
+  `--menubar` binary, so the constants keep every entry point identical. Tint via
+  `.renderingMode(.template).foregroundStyle(color)` — works both in-app and
+  inside the ImageRenderer-composited menu-bar label. Regenerate with
+  `scripts/regen-brand-marks.sh` (fetches the Simple Icons SVGs, rasterizes via
+  `qlmanage -t -s 128`, converts black-on-white → alpha mask `alpha = 255 −
+  luminance` in a CGContext, base64s, and re-emits `BrandMarks.swift`) — don't
+  hand-edit the base64. The heatmap legend tints marks with the richer cell hues
+  (`heatHue`), not the flat accent colors, so the key matches the cells.
 - **Liquid Glass: the MenuBarExtra(.window) popup is ALREADY system glass.**
   Per Apple ("avoid glass on glass; glass is only the navigation layer above
   content"), add NO `glassEffect` inside the popup — that was the "mess of radius
