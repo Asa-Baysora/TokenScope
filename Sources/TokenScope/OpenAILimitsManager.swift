@@ -57,6 +57,12 @@ final class OpenAILimitsManager: ObservableObject {
     var primaryPercent: Int? { percent("codex-primary") }
     var secondaryPercent: Int? { percent("codex-secondary") }
 
+    private func duration(_ id: String) -> String? { windows.first(where: { $0.id == id })?.period }
+    /// Observed rolling-window durations, so the menu bar labels Codex gauges
+    /// with Codex's real client-supplied periods instead of a hardcoded 5h/7d.
+    var primaryDuration: String? { duration("codex-primary") }
+    var secondaryDuration: String? { duration("codex-secondary") }
+
     /// Keeps the newest observed telemetry while the watcher replays old files
     /// at launch. Codex's window durations are supplied by the client rather
     /// than assumed to be five hours / seven days.
@@ -67,11 +73,15 @@ final class OpenAILimitsManager: ObservableObject {
             let candidates = [("primary", primary), ("secondary", secondary)]
             self.windows = candidates.compactMap { kind, window in
                 guard let window else { return nil }
+                let period = Self.duration(window.minutes)
+                // Role · duration, mirroring Claude's "Session · 5h" / "Weekly · 7d"
+                // (the "CODEX LIMITS" header already carries the provider name).
                 return LimitWindow(
                     id: "codex-\(kind)",
-                    label: "Codex · \(Self.duration(window.minutes))",
+                    label: "\(kind.capitalized) · \(period)",
                     utilization: window.percent,
-                    resetsAt: window.resetsAt)
+                    resetsAt: window.resetsAt,
+                    period: period)
             }
             self.lastUpdated = date
             self.maybeNotify()

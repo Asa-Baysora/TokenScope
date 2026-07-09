@@ -8,14 +8,17 @@ import AppKit
 /// The bitmap preserves the gauge colors; text is rendered for the current
 /// menu-bar appearance (light/dark) by the caller.
 enum MenuBarRender {
+    /// One limit gauge to composite into the menu-bar label. `period` is the
+    /// rolling-window text ("5h"/"7d") — Claude's are fixed, Codex's are the
+    /// real observed durations threaded in by the caller.
+    struct Gauge {
+        let origin: UsageOrigin
+        let period: String
+        let pct: Int
+    }
+
     @MainActor
-    static func image(sessionPct: Int?, weeklyPct: Int?, chatGPTPrimaryPct: Int?, chatGPTSecondaryPct: Int?, tokens: String?, dark: Bool) -> NSImage {
-        let gauges: [(origin: UsageOrigin, period: String, pct: Int)] = [
-            sessionPct.map { (.claudeCode, "5h", $0) },
-            weeklyPct.map { (.claudeCode, "7d", $0) },
-            chatGPTPrimaryPct.map { (.codex, "5h", $0) },
-            chatGPTSecondaryPct.map { (.codex, "7d", $0) },
-        ].compactMap { $0 }
+    static func image(gauges: [Gauge], tokens: String?, dark: Bool) -> NSImage {
         // The brand mark always identifies the provider; the rolling-period text
         // ("5h"/"7d") is only needed to disambiguate when more than one window
         // is shown (e.g. Claude session + weekly, which share a mark).
@@ -57,7 +60,7 @@ enum MenuBarRender {
         HStack(spacing: 3) {
             Image(nsImage: MenuBarGauge.image(fraction: fraction))
             BrandMarkView(origin: origin, size: 11)
-            Text(period.map { "\($0) \(pct)%" } ?? "\(pct)%")
+            Text(period.flatMap { $0.isEmpty ? nil : "\($0) \(pct)%" } ?? "\(pct)%")
                 .font(.system(size: 12, weight: .medium)).monospacedDigit()
         }
     }

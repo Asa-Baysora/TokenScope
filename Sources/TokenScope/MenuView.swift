@@ -18,6 +18,9 @@ struct MenuView: View {
     @ObservedObject var chatGPTLimits: ChatGPTLimitsManager
     @ObservedObject var status: StatusManager
     @ObservedObject var openAIStatus: StatusManager
+    // Provider accent colors — observed so a Settings color edit re-renders the
+    // heatmap, bars, marks, and legend live.
+    @ObservedObject private var palette = AppServices.shared.palette
     /// Snapshot mode renders the active tab inline: ScrollView is NSScrollView-
     /// backed on macOS and ImageRenderer can't draw it.
     var snapshotInline = false
@@ -348,7 +351,10 @@ struct MenuView: View {
             }
             if !openAILimits.monitoringEnabled {
                 Button { activeTabRaw = Tab.settings.rawValue } label: {
-                    Text("Enable local Codex monitoring in Settings").font(.system(size: 11.5))
+                    HStack(spacing: 6) {
+                        Image(systemName: "gearshape").font(.system(size: 10))
+                        Text("Enable local Codex monitoring in Settings").font(.system(size: 11.5))
+                    }
                 }
                 .buttonStyle(.plain).foregroundStyle(.blue)
             } else if openAILimits.windows.isEmpty {
@@ -373,7 +379,10 @@ struct MenuView: View {
             }
             if !chatGPTLimits.connected {
                 Button { activeTabRaw = Tab.settings.rawValue; chatGPTCookieDraft = "" } label: {
-                    Text("Connect ChatGPT to track web limits").font(.system(size: 11.5))
+                    HStack(spacing: 6) {
+                        Image(systemName: "link").font(.system(size: 10))
+                        Text("Connect ChatGPT to track web limits").font(.system(size: 11.5))
+                    }
                 }
                 .buttonStyle(.plain).foregroundStyle(.blue)
             } else if let error = chatGPTLimits.errorMessage, chatGPTLimits.windows.isEmpty {
@@ -494,7 +503,7 @@ struct MenuView: View {
     }
 
     private func callDetail(_ e: UsageEvent) -> String {
-        let cache = e.cacheReadTokens > 0 ? " (+\(Fmt.compact(e.cacheReadTokens)))" : ""
+        let cache = e.cacheReadTokens > 0 ? " +\(Fmt.compact(e.cacheReadTokens)) cache" : ""
         return "↑ \(Fmt.compact(e.inputTokens))\(cache)  ↓ \(Fmt.compact(e.outputTokens))"
     }
 
@@ -609,18 +618,22 @@ struct MenuView: View {
         return Self.shortDayFmt.string(from: first.day)
     }
 
+    // Shared bar tint: one opacity for all providers so stacked/grouped segments
+    // read at equal weight. Colors come from the palette (single source of truth).
+    private func barColor(_ o: UsageOrigin) -> Color { palette.color(o).opacity(0.9) }
+
     private func stackedBar(_ d: DayStat, maxV: Int, height: CGFloat) -> some View {
         VStack(spacing: 1) {
             if d.ollama > 0 {
-                RoundedRectangle(cornerRadius: 1).fill(Color.blue.opacity(0.85))
+                RoundedRectangle(cornerRadius: 1).fill(barColor(.ollama))
                     .frame(height: max(height * CGFloat(d.ollama) / CGFloat(maxV), 1.5))
             }
             if d.codex > 0 {
-                RoundedRectangle(cornerRadius: 1).fill(Color.purple.opacity(0.85))
+                RoundedRectangle(cornerRadius: 1).fill(barColor(.codex))
                     .frame(height: max(height * CGFloat(d.codex) / CGFloat(maxV), 1.5))
             }
             if d.claude > 0 {
-                RoundedRectangle(cornerRadius: 1).fill(Color.orange.opacity(0.9))
+                RoundedRectangle(cornerRadius: 1).fill(barColor(.claudeCode))
                     .frame(height: max(height * CGFloat(d.claude) / CGFloat(maxV), 1.5))
             }
             if d.total == 0 {
@@ -634,11 +647,11 @@ struct MenuView: View {
             if d.total == 0 {
                 RoundedRectangle(cornerRadius: 1).fill(Color.gray.opacity(0.15)).frame(height: 1.5)
             } else {
-                RoundedRectangle(cornerRadius: 1).fill(Color.orange.opacity(0.9))
+                RoundedRectangle(cornerRadius: 1).fill(barColor(.claudeCode))
                     .frame(height: d.claude > 0 ? max(height * CGFloat(d.claude) / CGFloat(maxV), 1.5) : 0)
-                RoundedRectangle(cornerRadius: 1).fill(Color.purple.opacity(0.85))
+                RoundedRectangle(cornerRadius: 1).fill(barColor(.codex))
                     .frame(height: d.codex > 0 ? max(height * CGFloat(d.codex) / CGFloat(maxV), 1.5) : 0)
-                RoundedRectangle(cornerRadius: 1).fill(Color.blue.opacity(0.85))
+                RoundedRectangle(cornerRadius: 1).fill(barColor(.ollama))
                     .frame(height: d.ollama > 0 ? max(height * CGFloat(d.ollama) / CGFloat(maxV), 1.5) : 0)
             }
         }
@@ -680,6 +693,11 @@ struct MenuView: View {
                         .help("Prompt-cache reads: context re-served from cache on each call instead of resent as fresh input. Billed at ~10% of the input rate.")
                 }
                 Text("↓ \(Fmt.compact(t.output))")
+                if t.reasoning > 0 {
+                    Text("· \(Fmt.compact(t.reasoning)) reasoning")
+                        .foregroundStyle(.secondary)
+                        .help("Reasoning tokens — a subset of output, already counted in ↓, shown here for detail.")
+                }
                 Spacer()
                 Text("\(t.calls) calls").foregroundStyle(.secondary)
             }
@@ -754,6 +772,7 @@ struct MenuView: View {
         parts.append("↑ \(Fmt.compact(s.totals.input))")
         if s.totals.cacheRead > 0 { parts.append("+\(Fmt.compact(s.totals.cacheRead)) cache") }
         parts.append("↓ \(Fmt.compact(s.totals.output))")
+        if s.totals.reasoning > 0 { parts.append("\(Fmt.compact(s.totals.reasoning)) reasoning") }
         return parts.joined(separator: " · ")
     }
 
@@ -787,10 +806,10 @@ struct MenuView: View {
                 }
                 HStack(spacing: 5) {
                     ForEach(UsageOrigin.allCases, id: \.rawValue) { origin in
-                        BrandMarkView(origin: origin, size: 11, tint: Self.heatHue(origin))
+                        BrandMarkView(origin: origin, size: 11)
                         Text(origin.displayName).font(.system(size: 9.5)).foregroundStyle(.secondary)
                     }
-                    Text("· hue = dominant source · darker = more")
+                    Text("· color mixes sources by share · more usage = stronger")
                         .font(.system(size: 9.5)).foregroundStyle(.secondary)
                 }
                 .padding(.top, 2)
@@ -831,26 +850,21 @@ struct MenuView: View {
 
     private func heatColor(_ d: DayStat, _ maxV: Int) -> Color {
         guard d.total > 0 else { return Color.gray.opacity(0.18) }
-        // A three-way RGB blend turns into ambiguous mud. Use the dominant
-        // local source for hue and retain volume in opacity; the tooltip has
-        // the exact source breakdown.
-        let dominant: UsageOrigin = (d.claude >= d.codex && d.claude >= d.ollama)
-            ? .claudeCode
-            : (d.codex >= d.ollama ? .codex : .ollama)
-        let t = Double(d.total) / Double(maxV)
-        let alpha: Double = t <= 0.25 ? 0.35 : (t <= 0.5 ? 0.55 : (t <= 0.75 ? 0.78 : 1.0))
-        return Self.heatHue(dominant).opacity(alpha)
-    }
-
-    /// Heatmap hue per source — deliberately richer than the flat accent colors
-    /// (`BrandMark.color`) so the cells read well at low opacity. Shared with the
-    /// legend marks so the key matches the cells exactly.
-    private static func heatHue(_ o: UsageOrigin) -> Color {
-        switch o {
-        case .claudeCode: return Color(red: 0.96, green: 0.58, blue: 0.20)
-        case .codex:      return .purple
-        case .ollama:     return Color(red: 0.35, green: 0.62, blue: 0.98)
+        // Blend the (customizable) provider colors by that day's token share, so
+        // mixed days read as a genuine mix rather than snapping to one hue. The
+        // blend is perceptual (OKLab) with chroma restoration so near-complementary
+        // pairs don't go grey; the tooltip still carries the exact breakdown.
+        let t = Double(d.total)
+        guard let base = palette.blend(claude: Double(d.claude) / t,
+                                       codex: Double(d.codex) / t,
+                                       ollama: Double(d.ollama) / t) else {
+            return Color.gray.opacity(0.18)
         }
+        // Opacity encodes total volume (more usage = stronger), orthogonal to hue.
+        // sqrt lifts ordinary days out of the heavy-tailed distribution; the 0.32
+        // floor keeps any nonzero day clearly above the empty-cell sentinel.
+        let n = min(1, t / Double(maxV))
+        return base.opacity(0.32 + 0.68 * n.squareRoot())
     }
 
     // MARK: - Settings tab
@@ -912,9 +926,9 @@ struct MenuView: View {
             .toggleStyle(.checkbox).controlSize(.small)
             VStack(alignment: .leading, spacing: 5) {
                 sectionTitle("Notifications")
-                Toggle("Session/weekly limit thresholds (25/50/75/90%)",
+                Toggle("Claude limit thresholds — session 25/50/75/90%, weekly 50/75/90%",
                        isOn: Binding(get: { limits.notificationsEnabled }, set: { limits.setNotifications($0) }))
-                Toggle("Codex limit thresholds (25/50/75/90%)",
+                Toggle("Codex limit thresholds — primary 25/50/75/90%, secondary 50/75/90%",
                        isOn: Binding(get: { openAILimits.notificationsEnabled }, set: { openAILimits.setNotifications($0) }))
                 Toggle("Anthropic service status changes",
                        isOn: Binding(get: { status.notificationsEnabled }, set: { status.setNotifications($0) }))
@@ -984,6 +998,24 @@ struct MenuView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             .toggleStyle(.checkbox).controlSize(.small)
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    sectionTitle("Provider colors")
+                    Spacer()
+                    Button("Reset") { palette.resetAll() }
+                        .font(.system(size: 11)).disabled(palette.isDefault)
+                }
+                ForEach(UsageOrigin.allCases, id: \.rawValue) { o in
+                    HStack(spacing: 8) {
+                        BrandMarkView(origin: o, size: 15)
+                        ColorPicker(o.displayName, selection: paletteBinding(o), supportsOpacity: false)
+                            .font(.system(size: 11.5))
+                    }
+                }
+                Text("Used for the brand marks, the Usage bar chart, the History heatmap (mixed-usage days blend these by token share), and the menu-bar gauges.")
+                    .font(.system(size: 9.5)).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             VStack(alignment: .leading, spacing: 5) {
                 sectionTitle("Show sections")
                 ForEach(AppSection.allCases) { s in
@@ -999,6 +1031,10 @@ struct MenuView: View {
 
     private func menuBarBinding(_ id: String) -> Binding<Bool> {
         Binding(get: { listContains(menuBarItemsRaw, id) }, set: { _ in toggleInList(&menuBarItemsRaw, id) })
+    }
+
+    private func paletteBinding(_ o: UsageOrigin) -> Binding<Color> {
+        Binding(get: { palette.color(o) }, set: { palette.setColor($0, for: o) })
     }
 
     private func tabFor(_ s: AppSection) -> Tab {

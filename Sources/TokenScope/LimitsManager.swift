@@ -6,9 +6,10 @@ import Combine
 /// One rate-limit window reported by claude.ai's usage endpoint.
 struct LimitWindow: Identifiable {
     let id: String        // "five_hour" | "seven_day" | "seven_day_sonnet"
-    let label: String     // "Session (5h)" etc.
+    let label: String     // "Session · 5h" etc.
     var utilization: Double   // 0…100
     var resetsAt: Date?
+    var period: String?   // short rolling-window label ("5h"/"7d") for the menu bar
 
     var fraction: Double { min(max(utilization / 100, 0), 1) }
 }
@@ -29,6 +30,7 @@ final class LimitsManager: ObservableObject {
     private var timer: Timer?
     private var sessionThreshold = ThresholdTracker(key: "limit_notified_session", thresholds: [25, 50, 75, 90])
     private var weeklyThreshold = ThresholdTracker(key: "limit_notified_weekly", thresholds: [50, 75, 90])
+    private var weeklySonnetThreshold = ThresholdTracker(key: "limit_notified_weekly_sonnet", thresholds: [50, 75, 90])
 
     private static let cookieKey = "claude_session_cookie"
     private static let notifKey = "limit_notifications_enabled"
@@ -46,17 +48,6 @@ final class LimitsManager: ObservableObject {
             self?.refresh()
         }
         refresh()
-    }
-
-    var menuColor: Color? {
-        guard connected, let top = windows.map(\.utilization).max() else { return nil }
-        return Self.color(forPercent: top)
-    }
-
-    /// Highest utilization across windows — the true "nearest wall" number.
-    var peakPercent: Int? {
-        guard connected, let top = windows.map(\.utilization).max() else { return nil }
-        return Int(top.rounded())
     }
 
     private func percent(_ id: String) -> Int? {
@@ -204,16 +195,16 @@ final class LimitsManager: ObservableObject {
             errorMessage = "Couldn't parse usage response"
             return
         }
-        func window(_ key: String, _ label: String) -> LimitWindow? {
+        func window(_ key: String, _ label: String, _ period: String) -> LimitWindow? {
             guard let obj = json[key] as? [String: Any] else { return nil }
             let util = (obj["utilization"] as? Double) ?? Double((obj["utilization"] as? Int) ?? 0)
             let reset = (obj["resets_at"] as? String).flatMap { Self.iso.date(from: $0) ?? Self.isoPlain.date(from: $0) }
-            return LimitWindow(id: key, label: label, utilization: util, resetsAt: reset)
+            return LimitWindow(id: key, label: label, utilization: util, resetsAt: reset, period: period)
         }
         var ws: [LimitWindow] = []
-        if let s = window("five_hour", "Session · 5h") { ws.append(s) }
-        if let w = window("seven_day", "Weekly · 7d") { ws.append(w) }
-        if let sn = window("seven_day_sonnet", "Weekly Sonnet · 7d") { ws.append(sn) }
+        if let s = window("five_hour", "Session · 5h", "5h") { ws.append(s) }
+        if let w = window("seven_day", "Weekly · 7d", "7d") { ws.append(w) }
+        if let sn = window("seven_day_sonnet", "Weekly Sonnet · 7d", "7d") { ws.append(sn) }
 
         windows = ws
         lastUpdated = Date()
@@ -235,6 +226,12 @@ final class LimitsManager: ObservableObject {
             Notifier.post(title: "Claude weekly limit \(t)%",
                           body: "You've used \(Int(w.utilization))% of your weekly limit.",
                           id: "limit-weekly-\(t)")
+        }
+        if let sn = ws.first(where: { $0.id == "seven_day_sonnet" }),
+           let t = weeklySonnetThreshold.evaluate(percent: Int(sn.utilization)) {
+            Notifier.post(title: "Claude weekly Sonnet limit \(t)%",
+                          body: "You've used \(Int(sn.utilization))% of your weekly Sonnet limit.",
+                          id: "limit-weekly-sonnet-\(t)")
         }
     }
 }

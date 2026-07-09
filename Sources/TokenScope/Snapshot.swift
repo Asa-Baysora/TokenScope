@@ -14,6 +14,12 @@ enum Snapshot {
         if let s = env["SNAPSHOT_BAR_STYLE"] { UserDefaults.standard.set(s, forKey: "BarChartStyle") }
         if let c = env["SNAPSHOT_INCLUDE_CACHE"] { UserDefaults.standard.set(c == "1", forKey: "ChartIncludeCache") }
         if let t = env["SNAPSHOT_TAB"] { UserDefaults.standard.set(t, forKey: "ActiveTab") }
+        // Custom provider colors so snapshots can verify the palette drives the
+        // heatmap/bars/marks (the bare binary otherwise renders defaults).
+        if let c = env["SNAPSHOT_PROVIDER_CLAUDE"] { UserDefaults.standard.set(c, forKey: "ProviderColorClaude") }
+        if let c = env["SNAPSHOT_PROVIDER_CODEX"] { UserDefaults.standard.set(c, forKey: "ProviderColorCodex") }
+        if let c = env["SNAPSHOT_PROVIDER_OLLAMA"] { UserDefaults.standard.set(c, forKey: "ProviderColorOllama") }
+        let dark = env["SNAPSHOT_APPEARANCE"] == "dark"
 
         let services = AppServices.shared
         // Let the transcript replay, proxy, and pollers populate the store.
@@ -24,6 +30,7 @@ enum Snapshot {
                             chatGPTLimits: services.chatGPTLimits,
                             status: services.status, openAIStatus: services.openAIStatus,
                             snapshotInline: true)
+            .environment(\.colorScheme, dark ? .dark : .light)
         let renderer = ImageRenderer(content: view)
         renderer.scale = 2
         guard let img = renderer.nsImage,

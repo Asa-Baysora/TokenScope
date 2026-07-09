@@ -16,6 +16,11 @@ final class CodexTranscriptWatcher {
     private var offsets: [String: UInt64] = [:]
     private var activePaths: Set<String> = []
     private var sessionMetadata: [String: (id: String, project: String?)] = [:]
+    // Codex records the model per turn in `turn_context`, not in the
+    // `token_count` record that carries usage. Track the latest model seen per
+    // file (turn_context precedes its token_counts in file order) so each event
+    // carries its real model instead of a generic "Codex".
+    private var latestModel: [String: String] = [:]
     private var tick = 0
     private var backfillFrom = Date.distantPast
     private var backfilling = false
@@ -26,6 +31,7 @@ final class CodexTranscriptWatcher {
     private static let hotWindow: TimeInterval = 180
     private static let tokenCountMarker = Data("\"token_count\"".utf8)
     private static let sessionMetaMarker = Data("\"session_meta\"".utf8)
+    private static let turnContextMarker = Data("\"turn_context\"".utf8)
     private static let isoFrac: ISO8601DateFormatter = {
         let f = ISO8601DateFormatter(); f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]; return f
     }()
@@ -66,6 +72,7 @@ final class CodexTranscriptWatcher {
                 self.offsets = [:]
                 self.activePaths = []
                 self.sessionMetadata = [:]
+                self.latestModel = [:]
                 self.tick = 0
                 self.bootstrap()
                 self.fullScan()
@@ -191,6 +198,7 @@ final class CodexTranscriptWatcher {
             let type: String?
             let id: String?
             let cwd: String?
+            let model: String?          // present on turn_context records
             let info: Info?
             let rate_limits: RateLimits?
         }
@@ -218,13 +226,21 @@ final class CodexTranscriptWatcher {
     private func parse(_ data: Data, file: URL, offset: UInt64) {
         let hasTokenCount = data.range(of: Self.tokenCountMarker) != nil
         let hasSessionMeta = data.range(of: Self.sessionMetaMarker) != nil
-        guard hasTokenCount || hasSessionMeta,
+        let hasTurnContext = data.range(of: Self.turnContextMarker) != nil
+        guard hasTokenCount || hasSessionMeta || hasTurnContext,
               let line = try? JSONDecoder().decode(Line.self, from: data) else { return }
         if hasSessionMeta, line.type == "session_meta", let payload = line.payload,
            let id = payload.id {
             sessionMetadata[file.path] = (
                 id: id,
                 project: payload.cwd.map { URL(fileURLWithPath: $0).lastPathComponent })
+            return
+        }
+        // turn_context names the model for the turn's subsequent token_count
+        // records (which don't carry it). Remember it per file.
+        if hasTurnContext, line.type == "turn_context",
+           let model = line.payload?.model, !model.isEmpty {
+            latestModel[file.path] = model
             return
         }
         guard line.type == "event_msg", line.payload?.type == "token_count" else { return }
@@ -242,7 +258,7 @@ final class CodexTranscriptWatcher {
             timestamp: timestamp,
             provider: .codex,
             source: .codexTranscript,
-            model: "Codex",
+            model: latestModel[file.path] ?? "Codex",
             sessionId: sessionMetadata[file.path]?.id ?? file.deletingPathExtension().lastPathComponent,
             projectName: sessionMetadata[file.path]?.project,
             inputTokens: input,

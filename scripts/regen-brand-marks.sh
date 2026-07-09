@@ -102,14 +102,10 @@ enum BrandMark {
         return img
     }
 
-    /// The single source of truth for provider accent colors, shared by the
-    /// brand marks and everywhere else a provider is color-coded.
+    /// Provider accent color — delegates to the user-customizable palette, the
+    /// single source of truth shared by marks, bars, heatmap, and menu-bar gauges.
     static func color(_ origin: UsageOrigin) -> Color {
-        switch origin {
-        case .claudeCode: return .orange
-        case .codex:      return .purple
-        case .ollama:     return .blue
-        }
+        ProviderPalette.shared.color(origin)
     }
 
     private static let claudeMark =
@@ -125,6 +121,9 @@ enum BrandMark {
 /// A provider's brand mark tinted in its accent color — the drop-in replacement
 /// for the small colored provider dots used across the menu.
 struct BrandMarkView: View {
+    // Leaf-observe the palette so a color edit re-renders the mark even when
+    // SwiftUI would otherwise diff this view as unchanged by its stored props.
+    @ObservedObject private var palette = ProviderPalette.shared
     let origin: UsageOrigin
     var size: CGFloat = 12
     var tint: Color? = nil
@@ -135,7 +134,7 @@ struct BrandMarkView: View {
             .renderingMode(.template)
             .interpolation(.high)
             .frame(width: size, height: size)
-            .foregroundStyle(tint ?? BrandMark.color(origin))
+            .foregroundStyle(tint ?? palette.color(origin))
     }
 }
 """

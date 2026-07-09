@@ -15,6 +15,7 @@ final class AppServices {
     let status: StatusManager
     let openAIStatus: StatusManager
     let appearance: AppearanceWatcher
+    let palette = ProviderPalette.shared
 
     private init() {
         let s = UsageStore()
@@ -57,7 +58,10 @@ struct TokenScopeApp: App {
     @StateObject private var status = AppServices.shared.status
     @StateObject private var openAIStatus = AppServices.shared.openAIStatus
     @StateObject private var appearance = AppServices.shared.appearance
-    // Which fields the menu bar shows: any Claude/ChatGPT limit window plus tokens.
+    // Observed so a provider-color edit re-runs body and rebuilds the menu-bar
+    // bitmap (its brand marks read the palette) — same mechanism as `appearance`.
+    @StateObject private var palette = AppServices.shared.palette
+    // Which fields the menu bar shows: any Claude/Codex limit window plus tokens.
     @AppStorage("MenuBarItems") private var menuBarItemsRaw = "tokens"
 
     var body: some Scene {
@@ -77,18 +81,26 @@ struct TokenScopeApp: App {
     /// fills/colors to ITS OWN utilization. Always shows tokens if nothing else
     /// resolves, so the bar is never empty.
     private var menuBarImage: NSImage {
-        let items = menuBarItemsRaw.split(separator: ",").map(String.init)
-        let session = items.contains("session") ? limits.sessionPercent : nil
-        let weekly = items.contains("weekly") ? limits.weeklyPercent : nil
-        let chatGPTPrimary = items.contains("chatgptPrimary") ? openAILimits.primaryPercent : nil
-        let chatGPTSecondary = items.contains("chatgptSecondary") ? openAILimits.secondaryPercent : nil
-        let wantTokens = items.contains("tokens") || (session == nil && weekly == nil
-            && chatGPTPrimary == nil && chatGPTSecondary == nil)
+        // The persisted item ids keep the legacy "chatgpt*" spelling (renaming
+        // them would silently reset users' menu-bar choices); everything in-memory
+        // uses the Codex domain.
+        let items = Set(menuBarItemsRaw.split(separator: ",").map(String.init))
+        var gauges: [MenuBarRender.Gauge] = []
+        if items.contains("session"), let p = limits.sessionPercent {
+            gauges.append(.init(origin: .claudeCode, period: "5h", pct: p))
+        }
+        if items.contains("weekly"), let p = limits.weeklyPercent {
+            gauges.append(.init(origin: .claudeCode, period: "7d", pct: p))
+        }
+        if items.contains("chatgptPrimary"), let p = openAILimits.primaryPercent {
+            gauges.append(.init(origin: .codex, period: openAILimits.primaryDuration ?? "", pct: p))
+        }
+        if items.contains("chatgptSecondary"), let p = openAILimits.secondaryPercent {
+            gauges.append(.init(origin: .codex, period: openAILimits.secondaryDuration ?? "", pct: p))
+        }
+        let wantTokens = items.contains("tokens") || gauges.isEmpty
         return MenuBarRender.image(
-            sessionPct: session,
-            weeklyPct: weekly,
-            chatGPTPrimaryPct: chatGPTPrimary,
-            chatGPTSecondaryPct: chatGPTSecondary,
+            gauges: gauges,
             tokens: wantTokens ? store.menuTitle : nil,
             dark: appearance.dark)
     }
@@ -139,9 +151,14 @@ enum Main {
     private static func dumpMenuBar(path: String) {
         // Several selections stacked, to verify separators and the both-on labels.
         let cases: [NSImage] = [
-            MenuBarRender.image(sessionPct: 28, weeklyPct: nil, chatGPTPrimaryPct: nil, chatGPTSecondaryPct: nil, tokens: nil, dark: true),
-            MenuBarRender.image(sessionPct: 28, weeklyPct: nil, chatGPTPrimaryPct: nil, chatGPTSecondaryPct: nil, tokens: "2.85M", dark: true),
-            MenuBarRender.image(sessionPct: 28, weeklyPct: 21, chatGPTPrimaryPct: 48, chatGPTSecondaryPct: 7, tokens: "2.85M", dark: true),
+            MenuBarRender.image(gauges: [.init(origin: .claudeCode, period: "5h", pct: 28)], tokens: nil, dark: true),
+            MenuBarRender.image(gauges: [.init(origin: .claudeCode, period: "5h", pct: 28)], tokens: "2.85M", dark: true),
+            MenuBarRender.image(gauges: [
+                .init(origin: .claudeCode, period: "5h", pct: 28),
+                .init(origin: .claudeCode, period: "7d", pct: 21),
+                .init(origin: .codex, period: "5h", pct: 48),
+                .init(origin: .codex, period: "7d", pct: 7),
+            ], tokens: "2.85M", dark: true),
         ]
         let scale: CGFloat = 6
         let rowH = (cases.map(\.size.height).max() ?? 16) * scale
