@@ -125,8 +125,9 @@ local-token tabs, and "how close to the wall" is the most actionable glance. The
 tabs are then purely local-token views. A custom (snapshot-renderable) **tab bar**
 splits them into four; within a tab each section is **collapsible** (persisted in
 `CollapsedSections`) and **hideable** from Settings (`HiddenSections`). The footer
-carries Anthropic service + proxy status; the menu-bar gauge tints to the nearest
-limit wall.
+carries Anthropic service status and links to `status.claude.com`; proxy health +
+the Copy-Ollama-env action live in Settings. The menu-bar gauge tints to the
+nearest limit wall.
 
 - **Header (always on, except Settings)** — Limits: per-window bars, % colored by
   the green→yellow→red gradient, reset countdowns, refresh; a connect prompt when

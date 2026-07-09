@@ -4,7 +4,8 @@ import AppKit
 /// Tabbed layout. A custom (snapshot-renderable) tab bar splits the content into
 /// Now / Usage / History / Settings; within a tab, each section is collapsible
 /// (chevron, persisted) and can be hidden entirely from Settings. The footer
-/// (Anthropic service + proxy status) and the menu-bar tint are always present.
+/// (Anthropic service status, linking to status.claude.com) and the menu-bar
+/// tint are always present; the proxy health + Ollama env live under Settings.
 ///
 ///   Now      — Limits (nearest rate-limit wall + reset), Live calls, Latest calls
 ///   Usage    — period-scoped chart, provider/model totals, sessions
@@ -738,6 +739,21 @@ struct MenuView: View {
                        isOn: Binding(get: { status.notificationsEnabled }, set: { status.setNotifications($0) }))
             }
             .toggleStyle(.checkbox).controlSize(.small).font(.system(size: 11.5))
+            VStack(alignment: .leading, spacing: 6) {
+                sectionTitle("Ollama proxy")
+                Text("TokenScope routes Ollama (and Claude-Code-via-Ollama) traffic through a local proxy so it can meter tokens as they stream. Point clients at it with the env vars below.")
+                    .font(.system(size: 11)).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                HStack(spacing: 6) {
+                    Circle().fill(store.proxyHealthy ? Color.green : Color.red).frame(width: 7, height: 7)
+                    Text(store.proxyHealthy ? "Running on port \(store.proxyPort)" : "Proxy down")
+                        .font(.system(size: 11.5))
+                    Spacer()
+                    Button("Copy Ollama env") { copyEnv() }
+                        .font(.system(size: 11))
+                        .help("Copies the env vars that point Claude Code at Ollama through the proxy")
+                }
+            }
             VStack(alignment: .leading, spacing: 5) {
                 sectionTitle("Show sections")
                 ForEach(AppSection.allCases) { s in
@@ -763,7 +779,7 @@ struct MenuView: View {
         }
     }
 
-    // MARK: - Footer (proxy + Anthropic service status)
+    // MARK: - Footer (Anthropic service status → status.claude.com link)
 
     private var footer: some View {
         VStack(alignment: .leading, spacing: 5) {
@@ -777,23 +793,35 @@ struct MenuView: View {
                 }
             }
             HStack(spacing: 6) {
-                Circle().fill(status.color).frame(width: 7, height: 7)
-                Text(status.allOperational ? "Claude: operational" : status.summary)
-                    .font(.system(size: 10.5)).foregroundStyle(.secondary).lineLimit(1)
-                Spacer()
-                Circle().fill(store.proxyHealthy ? Color.green : Color.red).frame(width: 7, height: 7)
-                Text(store.proxyHealthy ? "proxy :\(store.proxyPort)" : "proxy down")
-                    .font(.system(size: 10.5)).foregroundStyle(.secondary).lineLimit(1)
-            }
-            HStack {
-                Button("Copy Ollama env") { copyEnv() }
-                    .font(.system(size: 11))
-                    .help("Copies the env vars that point Claude Code at Ollama through the proxy")
+                statusLink
                 Spacer()
                 Button("Quit") { NSApp.terminate(nil) }
                     .font(.system(size: 11))
             }
         }
+    }
+
+    /// The service-status row doubles as a link to Anthropic's status page —
+    /// the natural place to go when the dot turns yellow/red. NSWorkspace works
+    /// even where NSApp is nil (snapshot/menubar paths); the button is never hit
+    /// there anyway.
+    private var statusLink: some View {
+        Button {
+            if let url = URL(string: "https://status.claude.com") {
+                NSWorkspace.shared.open(url)
+            }
+        } label: {
+            HStack(spacing: 6) {
+                Circle().fill(status.color).frame(width: 7, height: 7)
+                Text(status.allOperational ? "Claude: operational" : status.summary)
+                    .font(.system(size: 10.5)).lineLimit(1)
+                Image(systemName: "arrow.up.forward").font(.system(size: 8, weight: .semibold))
+            }
+            .foregroundStyle(.secondary)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help("Open status.claude.com")
     }
 
     private func copyEnv() {
