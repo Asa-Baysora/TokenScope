@@ -37,6 +37,17 @@ final class StatusManager: ObservableObject {
             case .openAI: return "openai-status"
             }
         }
+
+        /// Surfaces the user doesn't consume — government / FedRAMP-only
+        /// components and incidents. An issue confined to these is filtered out
+        /// so the app still reads as operational (and won't notify). Matched as
+        /// lowercased substrings of the component/incident name.
+        var excludedNameSubstrings: [String] {
+            switch self {
+            case .claude: return ["government"]      // "Claude for Government", etc.
+            case .openAI: return ["fedramp", "fed ramp"]
+            }
+        }
     }
 
     @Published private(set) var indicator = "none"     // none | minor | major | critical
@@ -105,6 +116,7 @@ final class StatusManager: ObservableObject {
                       let st = c["status"] as? String, st != "operational" else { continue }
                 // Skip group rows (they have no own status meaning here).
                 if (c["group"] as? Bool) == true { continue }
+                if isExcluded(name) { continue }
                 degradedComps.append(Component(id: id, name: name, status: st))
             }
         }
@@ -116,32 +128,48 @@ final class StatusManager: ObservableObject {
                       let name = inc["name"] as? String,
                       let st = inc["status"] as? String,
                       st != "resolved", st != "postmortem" else { continue }
+                if isExcluded(name) { continue }
                 let updates = inc["incident_updates"] as? [[String: Any]] ?? []
                 let body = (updates.first?["body"] as? String) ?? ""
                 incs.append(Incident(id: id, name: name, status: st, update: body))
             }
         }
 
+        // The Statuspage top-level indicator/description can be elevated solely
+        // by an excluded (government/FedRAMP) surface. Derive the DISPLAYED
+        // status from what survives filtering: nothing left ⇒ operational, so a
+        // gov/FedRAMP-only degradation reads green and doesn't notify.
+        let anyIssues = !degradedComps.isEmpty || !incs.isEmpty
+        let effectiveInd = anyIssues ? ind : "none"
+        let effectiveDesc = anyIssues ? desc : "All systems operational"
+
         DispatchQueue.main.async {
             let previous = self.indicator
             let firstFetch = self.lastUpdated == nil
-            self.indicator = ind
-            self.summary = desc
+            self.indicator = effectiveInd
+            self.summary = effectiveDesc
             self.degraded = degradedComps
             self.incidents = incs
             self.lastUpdated = Date()
-            FileLog.log("\(self.service.displayName) status: \(ind) — \(desc); degraded=\(degradedComps.count) incidents=\(incs.count)")
-            if !firstFetch, previous != ind, self.notificationsEnabled {
-                if ind == "none" {
+            FileLog.log("\(self.service.displayName) status: \(effectiveInd) — \(effectiveDesc) (raw \(ind)); degraded=\(degradedComps.count) incidents=\(incs.count)")
+            if !firstFetch, previous != effectiveInd, self.notificationsEnabled {
+                if effectiveInd == "none" {
                     Notifier.post(title: "\(self.service.displayName) is back online",
                                   body: "All systems operational.",
                                   id: "\(self.service.notificationIDPrefix)-none")
                 } else {
-                    Notifier.post(title: "\(self.service.displayName) status: \(desc)",
+                    Notifier.post(title: "\(self.service.displayName) status: \(effectiveDesc)",
                                   body: "See \(self.service.statusURL.host ?? "the status page") for details.",
-                                  id: "\(self.service.notificationIDPrefix)-\(ind)")
+                                  id: "\(self.service.notificationIDPrefix)-\(effectiveInd)")
                 }
             }
         }
+    }
+
+    /// True when a component/incident name matches one of this service's
+    /// excluded (government/FedRAMP) surfaces.
+    private func isExcluded(_ name: String) -> Bool {
+        let n = name.lowercased()
+        return service.excludedNameSubstrings.contains { n.contains($0) }
     }
 }
