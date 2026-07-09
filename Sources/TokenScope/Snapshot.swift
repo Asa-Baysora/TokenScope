@@ -18,7 +18,10 @@ enum Snapshot {
         // Let the transcript replay, proxy, and pollers populate the store.
         RunLoop.main.run(until: Date().addingTimeInterval(8))
 
-        let view = MenuView(store: services.store, limits: services.limits, status: services.status, snapshotInline: true)
+        let view = MenuView(store: services.store, limits: services.limits,
+                            openAILimits: services.openAILimits,
+                            chatGPTLimits: services.chatGPTLimits,
+                            status: services.status, snapshotInline: true)
         let renderer = ImageRenderer(content: view)
         renderer.scale = 2
         guard let img = renderer.nsImage,

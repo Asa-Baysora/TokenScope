@@ -8,12 +8,14 @@ import AppKit
 /// tint are always present; the proxy health + Ollama env live under Settings.
 ///
 ///   Now      — Limits (nearest rate-limit wall + reset), Live calls, Latest calls
-///   Usage    — period-scoped chart, provider/model totals, sessions
+///   Usage    — period-scoped chart, source/model totals, sessions
 ///   History  — 6-month activity heatmap
 ///   Settings — claude.ai cookie, notifications, section visibility
 struct MenuView: View {
     @ObservedObject var store: UsageStore
     @ObservedObject var limits: LimitsManager
+    @ObservedObject var openAILimits: OpenAILimitsManager
+    @ObservedObject var chatGPTLimits: ChatGPTLimitsManager
     @ObservedObject var status: StatusManager
     /// Snapshot mode renders the active tab inline: ScrollView is NSScrollView-
     /// backed on macOS and ImageRenderer can't draw it.
@@ -27,6 +29,7 @@ struct MenuView: View {
     @AppStorage("HiddenSections") private var hiddenRaw = ""
     @AppStorage("MenuBarItems") private var menuBarItemsRaw = "tokens"
     @State private var cookieDraft = ""
+    @State private var chatGPTCookieDraft = ""
     @State private var contentHeight: CGFloat = 360
 
     /// Cap on the scroll viewport; tabs shorter than this shrink to fit (no dead
@@ -86,7 +89,7 @@ struct MenuView: View {
         VStack(alignment: .leading, spacing: 0) {
             titleBar.padding(.bottom, 8)
             if activeTab != .settings {
-                limitsHeader.padding(.bottom, 10)
+                accountLimitsHeader.padding(.bottom, 10)
             }
             tabBar.padding(.bottom, 10)
             content
@@ -129,8 +132,7 @@ struct MenuView: View {
     // MARK: - Title bar & tabs
 
     private var titleBar: some View {
-        let c = store.totals(for: .claude, in: .today)
-        let o = store.totals(for: .ollama, in: .today)
+        let totals = UsageOrigin.allCases.map { ($0, store.totals(for: $0, in: .today)) }
         return HStack(alignment: .firstTextBaseline, spacing: 8) {
             Text("TokenScope").font(.headline)
             Spacer()
@@ -138,9 +140,10 @@ struct MenuView: View {
             // misleading (often dominated by free local Ollama traffic).
             HStack(spacing: 7) {
                 Text("today").font(.system(size: 10)).foregroundStyle(.secondary)
-                if c.calls > 0 { providerTotalChip(.claude, c.input + c.output) }
-                if o.calls > 0 { providerTotalChip(.ollama, o.input + o.output) }
-                if c.calls == 0 && o.calls == 0 {
+                ForEach(totals.filter { $0.1.calls > 0 }, id: \.0.rawValue) { origin, total in
+                    providerTotalChip(origin, total.input + total.output)
+                }
+                if totals.allSatisfy({ $0.1.calls == 0 }) {
                     Text("—").font(.system(size: 11)).foregroundStyle(.secondary)
                 }
             }
@@ -148,7 +151,7 @@ struct MenuView: View {
         }
     }
 
-    private func providerTotalChip(_ p: TokenProvider, _ total: Int) -> some View {
+    private func providerTotalChip(_ p: UsageOrigin, _ total: Int) -> some View {
         HStack(spacing: 3) {
             Circle().fill(color(p)).frame(width: 6, height: 6)
             Text(Fmt.compact(total)).font(.system(size: 11)).foregroundStyle(.secondary)
@@ -248,7 +251,18 @@ struct MenuView: View {
         }
     }
 
-    // MARK: - Limits header (always visible above the tabs)
+    // MARK: - Account-limit headers (always visible above the tabs)
+
+    private var accountLimitsHeader: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            limitsHeader
+            codexLimitsHeader
+            // ChatGPT is web-only and optional. Keep its connection workflow in
+            // Settings until a Cookie is present so always-visible account
+            // limits don't consume most of the menu's vertical real estate.
+            if chatGPTLimits.connected { chatGPTLimitsHeader }
+        }
+    }
 
     /// claude.ai plan limits. Pulled out of the tabs because it's a different
     /// scope and unit from everything else: account-wide utilization % (covers
@@ -288,6 +302,68 @@ struct MenuView: View {
                 }
             } else {
                 ForEach(limits.windows) { w in limitRow(w) }
+            }
+        }
+        .padding(11)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .sectionCard(cornerRadius: 13)
+    }
+
+    @ViewBuilder private var codexLimitsHeader: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                Text("CODEX LIMITS")
+                    .font(.system(size: 10, weight: .semibold)).foregroundStyle(.secondary)
+                Text("observed from local Codex sessions")
+                    .font(.system(size: 9.5)).foregroundStyle(.tertiary)
+                Spacer()
+                if let seen = openAILimits.lastUpdated {
+                    Text("seen \(when(seen))").font(.system(size: 9.5)).foregroundStyle(.tertiary)
+                }
+            }
+            if !openAILimits.monitoringEnabled {
+                Button { activeTabRaw = Tab.settings.rawValue } label: {
+                    Text("Enable local Codex monitoring in Settings").font(.system(size: 11.5))
+                }
+                .buttonStyle(.plain).foregroundStyle(.blue)
+            } else if openAILimits.windows.isEmpty {
+                Text("Awaiting a local Codex turn to report quota status.")
+                    .font(.system(size: 11)).foregroundStyle(.secondary)
+            } else {
+                ForEach(openAILimits.windows) { limitRow($0) }
+            }
+        }
+        .padding(11)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .sectionCard(cornerRadius: 13)
+    }
+
+    @ViewBuilder private var chatGPTLimitsHeader: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                Text("CHATGPT LIMITS")
+                    .font(.system(size: 10, weight: .semibold)).foregroundStyle(.secondary)
+                Text("experimental web connection")
+                    .font(.system(size: 9.5)).foregroundStyle(.tertiary)
+                Spacer()
+                if chatGPTLimits.connected, !chatGPTLimits.windows.isEmpty {
+                    Button { chatGPTLimits.refresh() } label: {
+                        Image(systemName: "arrow.clockwise").font(.system(size: 10, weight: .semibold))
+                    }
+                    .buttonStyle(.plain).foregroundStyle(.secondary)
+                }
+            }
+            if !chatGPTLimits.connected {
+                Button { activeTabRaw = Tab.settings.rawValue; chatGPTCookieDraft = "" } label: {
+                    Text("Connect ChatGPT to track web limits").font(.system(size: 11.5))
+                }
+                .buttonStyle(.plain).foregroundStyle(.blue)
+            } else if let error = chatGPTLimits.errorMessage {
+                Text(error).font(.system(size: 11)).foregroundStyle(.secondary)
+            } else if chatGPTLimits.windows.isEmpty {
+                Text("Loading ChatGPT limits…").font(.system(size: 11)).foregroundStyle(.secondary)
+            } else {
+                ForEach(chatGPTLimits.windows) { limitRow($0) }
             }
         }
         .padding(11)
@@ -397,13 +473,14 @@ struct MenuView: View {
                 .controlSize(.small)
                 Spacer()
             }
-            Text("Token counts from Claude Code + Ollama on this Mac (excludes claude.ai web & desktop).")
+            Text("Local tokens observed on this Mac: Claude Code, Codex, and Ollama (excludes web/desktop ChatGPT and claude.ai).")
                 .font(.system(size: 9.5)).foregroundStyle(.tertiary)
                 .fixedSize(horizontal: false, vertical: true)
             section(.chart) { chartBlock }
             section(.providers) {
                 VStack(alignment: .leading, spacing: 8) {
-                    providerBlock(.claude)
+                    providerBlock(.claudeCode)
+                    providerBlock(.codex)
                     providerBlock(.ollama)
                 }
             }
@@ -419,7 +496,7 @@ struct MenuView: View {
             : allBars
         let grouped = barStyleRaw == "grouped"
         let maxV = grouped
-            ? max(bars.map { max($0.claude, $0.ollama) }.max() ?? 0, 1)
+            ? max(bars.map { max($0.claude, $0.codex, $0.ollama) }.max() ?? 0, 1)
             : max(bars.map(\.total).max() ?? 0, 1)
         let maxTotal = max(bars.map(\.total).max() ?? 0, 1)
         let barHeight: CGFloat = 42
@@ -479,7 +556,7 @@ struct MenuView: View {
 
     private func chartHelp(_ d: DayStat) -> String {
         let label = period == .today ? Self.hourFmt.string(from: d.day) : Self.dayFmt.string(from: d.day)
-        return "\(label): Claude \(Fmt.compact(d.claude)) · Ollama \(Fmt.compact(d.ollama))"
+        return "\(label): Claude \(Fmt.compact(d.claude)) · Codex \(Fmt.compact(d.codex)) · Ollama \(Fmt.compact(d.ollama))"
     }
 
     private func leadingEdgeLabel(_ bars: [DayStat]) -> String {
@@ -493,6 +570,10 @@ struct MenuView: View {
             if d.ollama > 0 {
                 RoundedRectangle(cornerRadius: 1).fill(Color.blue.opacity(0.85))
                     .frame(height: max(height * CGFloat(d.ollama) / CGFloat(maxV), 1.5))
+            }
+            if d.codex > 0 {
+                RoundedRectangle(cornerRadius: 1).fill(Color.purple.opacity(0.85))
+                    .frame(height: max(height * CGFloat(d.codex) / CGFloat(maxV), 1.5))
             }
             if d.claude > 0 {
                 RoundedRectangle(cornerRadius: 1).fill(Color.orange.opacity(0.9))
@@ -511,13 +592,15 @@ struct MenuView: View {
             } else {
                 RoundedRectangle(cornerRadius: 1).fill(Color.orange.opacity(0.9))
                     .frame(height: d.claude > 0 ? max(height * CGFloat(d.claude) / CGFloat(maxV), 1.5) : 0)
+                RoundedRectangle(cornerRadius: 1).fill(Color.purple.opacity(0.85))
+                    .frame(height: d.codex > 0 ? max(height * CGFloat(d.codex) / CGFloat(maxV), 1.5) : 0)
                 RoundedRectangle(cornerRadius: 1).fill(Color.blue.opacity(0.85))
                     .frame(height: d.ollama > 0 ? max(height * CGFloat(d.ollama) / CGFloat(maxV), 1.5) : 0)
             }
         }
     }
 
-    private func providerBlock(_ p: TokenProvider) -> some View {
+    private func providerBlock(_ p: UsageOrigin) -> some View {
         let models = store.modelTotals(for: p, in: period)
         let shown = Array(models.prefix(5))
         return VStack(alignment: .leading, spacing: 3) {
@@ -538,7 +621,7 @@ struct MenuView: View {
         }
     }
 
-    private func providerRow(_ p: TokenProvider) -> some View {
+    private func providerRow(_ p: UsageOrigin) -> some View {
         let t = store.totals(for: p, in: period)
         return HStack(spacing: 6) {
             Circle().fill(color(p)).frame(width: 7, height: 7)
@@ -629,10 +712,12 @@ struct MenuView: View {
                 }
                 HStack(spacing: 5) {
                     Circle().fill(Color(red: 0.96, green: 0.58, blue: 0.20)).frame(width: 6, height: 6)
-                    Text("Claude").font(.system(size: 9.5)).foregroundStyle(.secondary)
+                    Text("Claude Code").font(.system(size: 9.5)).foregroundStyle(.secondary)
+                    Circle().fill(Color.purple).frame(width: 6, height: 6)
+                    Text("Codex").font(.system(size: 9.5)).foregroundStyle(.secondary)
                     Circle().fill(Color(red: 0.35, green: 0.62, blue: 0.98)).frame(width: 6, height: 6)
                     Text("Ollama").font(.system(size: 9.5)).foregroundStyle(.secondary)
-                    Text("· hue = day's mix · darker = more")
+                    Text("· hue = dominant source · darker = more")
                         .font(.system(size: 9.5)).foregroundStyle(.secondary)
                 }
                 .padding(.top, 2)
@@ -668,18 +753,25 @@ struct MenuView: View {
         return RoundedRectangle(cornerRadius: 3)
             .fill(future ? Color.clear : heatColor(d, maxV))
             .frame(width: 13, height: 13)
-            .help(future ? "" : "\(Self.dayFmt.string(from: d.day)): \(Fmt.compact(d.total)) tokens (Claude \(Fmt.compact(d.claude)) · Ollama \(Fmt.compact(d.ollama)))")
+            .help(future ? "" : "\(Self.dayFmt.string(from: d.day)): \(Fmt.compact(d.total)) tokens (Claude Code \(Fmt.compact(d.claude)) · Codex \(Fmt.compact(d.codex)) · Ollama \(Fmt.compact(d.ollama)))")
     }
 
     private func heatColor(_ d: DayStat, _ maxV: Int) -> Color {
         guard d.total > 0 else { return Color.gray.opacity(0.18) }
-        let f = Double(d.ollama) / Double(d.total)
-        let red = 0.96 + (0.35 - 0.96) * f
-        let green = 0.58 + (0.62 - 0.58) * f
-        let blue = 0.20 + (0.98 - 0.20) * f
+        // A three-way RGB blend turns into ambiguous mud. Use the dominant
+        // local source for hue and retain volume in opacity; the tooltip has
+        // the exact source breakdown.
+        let hue: Color
+        if d.claude >= d.codex && d.claude >= d.ollama {
+            hue = Color(red: 0.96, green: 0.58, blue: 0.20)
+        } else if d.codex >= d.ollama {
+            hue = .purple
+        } else {
+            hue = Color(red: 0.35, green: 0.62, blue: 0.98)
+        }
         let t = Double(d.total) / Double(maxV)
         let alpha: Double = t <= 0.25 ? 0.35 : (t <= 0.5 ? 0.55 : (t <= 0.75 ? 0.78 : 1.0))
-        return Color(red: red, green: green, blue: blue).opacity(alpha)
+        return hue.opacity(alpha)
     }
 
     // MARK: - Settings tab
@@ -739,6 +831,44 @@ struct MenuView: View {
                        isOn: Binding(get: { status.notificationsEnabled }, set: { status.setNotifications($0) }))
             }
             .toggleStyle(.checkbox).controlSize(.small).font(.system(size: 11.5))
+            VStack(alignment: .leading, spacing: 6) {
+                sectionTitle("Codex local usage")
+                Toggle("Monitor local Codex sessions", isOn: Binding(
+                    get: { openAILimits.monitoringEnabled },
+                    set: { openAILimits.setMonitoring($0) }))
+                    .font(.system(size: 11.5))
+                Text("Reads only token_count telemetry in ~/.codex/sessions. Prompts, replies, and tool data are not stored by TokenScope.")
+                    .font(.system(size: 9.5)).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .toggleStyle(.checkbox).controlSize(.small)
+            VStack(alignment: .leading, spacing: 6) {
+                sectionTitle("ChatGPT connection · experimental")
+                Text("Paste your ChatGPT Cookie header to fetch web limit windows. This uses a private web endpoint, so it can expire or change without notice.")
+                    .font(.system(size: 11)).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                if chatGPTLimits.connected {
+                    HStack(spacing: 6) {
+                        Image(systemName: "checkmark.circle.fill").foregroundStyle(.green).font(.system(size: 11))
+                        Text("Cookie saved").font(.system(size: 11.5))
+                        if let error = chatGPTLimits.errorMessage {
+                            Text("· \(error)").font(.system(size: 11)).foregroundStyle(.orange).lineLimit(1)
+                        }
+                        Spacer()
+                        Button("Disconnect") { chatGPTLimits.clearCookie() }.font(.system(size: 11))
+                    }
+                }
+                HStack(spacing: 6) {
+                    SecureField("ChatGPT Cookie header value…", text: $chatGPTCookieDraft)
+                        .textFieldStyle(.roundedBorder).font(.system(size: 11))
+                    Button("Save") { chatGPTLimits.setCookie(chatGPTCookieDraft); chatGPTCookieDraft = "" }
+                        .buttonStyle(.borderedProminent).font(.system(size: 11))
+                        .disabled(chatGPTCookieDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+                Text("Stored locally in app preferences and sent only to chatgpt.com. It reports only limits returned by ChatGPT, not invented per-chat token totals.")
+                    .font(.system(size: 9.5)).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             VStack(alignment: .leading, spacing: 6) {
                 sectionTitle("Ollama proxy")
                 Text("TokenScope routes Ollama (and Claude-Code-via-Ollama) traffic through a local proxy so it can meter tokens as they stream. Point clients at it with the env vars below.")
@@ -875,9 +1005,10 @@ struct MenuView: View {
         Text(t).font(.system(size: 11)).foregroundStyle(.secondary)
     }
 
-    private func color(_ p: TokenProvider) -> Color {
+    private func color(_ p: UsageOrigin) -> Color {
         switch p {
-        case .claude: return .orange
+        case .claudeCode: return .orange
+        case .codex: return .purple
         case .ollama: return .blue
         }
     }

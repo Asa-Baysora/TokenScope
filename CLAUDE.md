@@ -1,10 +1,11 @@
 # CLAUDE.md
 
 TokenScope is a macOS menu bar app (SwiftPM, SwiftUI `MenuBarExtra`) that meters
-LLM token usage — live, per call, per session, per day — for Claude Code (native
-Anthropic or pointed at Ollama) and for any Ollama client routed through its
-local proxy. It also tracks claude.ai plan limits (session/weekly utilization,
-reset timers, threshold alerts) and Anthropic service status. See
+local LLM token usage — live, per call, per session, per day — for Claude Code
+(native Anthropic or pointed at Ollama), Codex local sessions, and any Ollama
+client routed through its local proxy. It also tracks claude.ai plan limits,
+observed Codex quota windows, experimental ChatGPT web limits, and Anthropic
+service status. See
 `docs/ARCHITECTURE.md` for the full design.
 
 UI is tabbed (Now / Usage / History / Settings); sections within a tab are
@@ -56,8 +57,9 @@ reason (`MenuView(snapshotInline: true)`).
   the only request mutation is forcing `Accept-Encoding: identity` so responses
   stay scannable. Scanning is newline-framed (NDJSON/SSE) with a regex fallback
   for lines split by chunked-transfer framing.
-- `ollama` provider classification is just `model.hasPrefix("claude")` → claude,
-  else ollama. Transcript `model == "<synthetic>"` lines are skipped.
+- Claude Code transcript classification is `model.hasPrefix("claude")` →
+  `claudeCode`, else `ollama`; Codex comes only from its explicit local watcher.
+  Transcript `model == "<synthetic>"` lines are skipped.
 - **Session names** come from Claude Code's `{"type":"ai-title","aiTitle":…}`
   line (the exact `/resume` name), then older `"summary"` lines, then first user
   message. ai-title overwrites; fallback only fills gaps.
@@ -66,9 +68,11 @@ reason (`MenuView(snapshotInline: true)`).
   `--snapshot` binary. See `Notifier.available`.
 - **Tab bar is a custom button row, not a segmented Picker** — deliberately, so
   it renders in snapshots. Don't "simplify" it to a Picker.
-- The **claude.ai usage endpoint is unofficial** and the cookie is a session
-  credential stored in UserDefaults (matches the upstream ClaudeUsageBar; a
-  Keychain move is the obvious hardening if this graduates beyond personal use).
+- The **claude.ai and ChatGPT usage endpoints are unofficial** and their cookies
+  are session credentials stored in UserDefaults (matches the upstream
+  ClaudeUsageBar; a Keychain move is the obvious hardening if this graduates
+  beyond personal use). Keep ChatGPT's parser isolated: it may change without
+  affecting local Claude/Codex/Ollama tracking.
 - **The menu bar drops elements from a multi-part SwiftUI label** and forces
   text monochrome. Compose the WHOLE label (gauges + text) into ONE bitmap via
   ImageRenderer and hand the bar a single `Image(nsImage:)` — see `MenuBarRender`.
@@ -113,6 +117,9 @@ Idle CPU must stay near zero. Measured regressions that were fixed; don't undo:
 - `~/Library/Application Support/TokenScope/daily-history.json` — frozen per-day
   aggregates + `completeThrough`; outlives Claude Code's transcript cleanup.
   Deleting it triggers a fresh one-time backfill (≤366 days) on next launch.
+- Codex raw session logs remain in `~/.codex/sessions/**/*.jsonl`; TokenScope
+  reads only `session_meta` and `token_count` records, then retains the same
+  31-day event window and permanent day aggregates as other local sources.
 - `~/Library/Logs/TokenScope.log` — every ingested event and lifecycle step;
   first place to look when verifying behavior.
 - Ports via `defaults write com.baysora.tokenscope ProxyPort|OllamaPort -int N`

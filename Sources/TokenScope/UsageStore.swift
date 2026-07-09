@@ -105,7 +105,7 @@ final class UsageStore: ObservableObject {
                     }
                 }
             }
-            self.events.append(e)
+            self.appendEvent(e)
             self.trim()
             // Intentionally not logged per-event: at thousands of events/replay this
             // dominated both the log size and the write overhead. Lifecycle summaries
@@ -145,7 +145,8 @@ final class UsageStore: ObservableObject {
                 inputTokens: st.input,
                 outputTokens: st.displayOutput,
                 cacheReadTokens: st.cacheRead,
-                cacheCreationTokens: st.cacheCreate)
+                cacheCreationTokens: st.cacheCreate,
+                reasoningTokens: 0)
             // Reverse of the shadowing above, in case the transcript line landed first.
             for t in self.events.suffix(60)
             where t.source == .transcript && t.provider == .ollama && !t.shadowed {
@@ -154,7 +155,7 @@ final class UsageStore: ObservableObject {
                     break
                 }
             }
-            self.events.append(e)
+            self.appendEvent(e)
             self.trim()
             self.persistProxyEvent(e)
             FileLog.log("proxy \(e.model) in=\(e.inputTokens) out=\(e.outputTokens) shadowed=\(e.shadowed)")
@@ -219,6 +220,23 @@ final class UsageStore: ObservableObject {
     private func pruneStaleLiveCalls() {
         let cutoff = Date().addingTimeInterval(-180)
         liveCalls.removeAll { $0.lastUpdate < cutoff }
+    }
+
+    /// Claude and Codex replay independently at launch. Keep the shared event
+    /// window chronological even if their directory enumerations interleave;
+    /// trim(), recent calls, and time-based reconciliation all rely on it.
+    private func appendEvent(_ event: UsageEvent) {
+        guard let last = events.last, last.timestamp > event.timestamp else {
+            events.append(event)
+            return
+        }
+        var low = 0
+        var high = events.count
+        while low < high {
+            let mid = (low + high) / 2
+            if events[mid].timestamp <= event.timestamp { low = mid + 1 } else { high = mid }
+        }
+        events.insert(event, at: low)
     }
 
     private func trim() {
@@ -295,9 +313,10 @@ final class UsageStore: ObservableObject {
                 inputTokens: pe.input,
                 outputTokens: pe.output,
                 cacheReadTokens: pe.cacheR,
-                cacheCreationTokens: pe.cacheC))
+                cacheCreationTokens: pe.cacheC,
+                reasoningTokens: 0))
         }
-        events = loaded
+        events = loaded.sorted { $0.timestamp < $1.timestamp }
         ioQueue.async {
             try? FileManager.default.createDirectory(at: Self.supportDir, withIntermediateDirectories: true)
             try? compacted.write(to: Self.proxyEventsURL)
@@ -338,7 +357,7 @@ final class UsageStore: ObservableObject {
         return events.filter { $0.timestamp >= start && !$0.shadowed }
     }
 
-    func totals(for provider: TokenProvider?, in period: StatsPeriod) -> Totals {
+    func totals(for provider: UsageOrigin?, in period: StatsPeriod) -> Totals {
         var t = Totals()
         for e in events(in: period) where provider == nil || e.provider == provider {
             t.add(e)
@@ -346,7 +365,7 @@ final class UsageStore: ObservableObject {
         return t
     }
 
-    func modelTotals(for provider: TokenProvider, in period: StatsPeriod) -> [(model: String, totals: Totals)] {
+    func modelTotals(for provider: UsageOrigin, in period: StatsPeriod) -> [(model: String, totals: Totals)] {
         var by: [String: Totals] = [:]
         for e in events(in: period) where e.provider == provider {
             by[e.model, default: Totals()].add(e)
@@ -381,7 +400,11 @@ final class UsageStore: ObservableObject {
             let day = cal.startOfDay(for: e.timestamp)
             var stat = by[day] ?? DayStat(day: day)
             let tokens = e.inputTokens + e.outputTokens
-            if e.provider == .claude { stat.claude += tokens } else { stat.ollama += tokens }
+            switch e.provider {
+            case .claudeCode: stat.claude += tokens
+            case .codex: stat.codex += tokens
+            case .ollama: stat.ollama += tokens
+            }
             by[day] = stat
         }
         return (0..<period.days).reversed().compactMap { offset in
@@ -399,7 +422,11 @@ final class UsageStore: ObservableObject {
             let h = Int(e.timestamp.timeIntervalSince(dayStart) / 3600)
             guard (0..<24).contains(h) else { continue }
             let tokens = e.inputTokens + e.outputTokens
-            if e.provider == .claude { out[h].claude += tokens } else { out[h].ollama += tokens }
+            switch e.provider {
+            case .claudeCode: out[h].claude += tokens
+            case .codex: out[h].codex += tokens
+            case .ollama: out[h].ollama += tokens
+            }
         }
         return out
     }
@@ -420,7 +447,11 @@ final class UsageStore: ObservableObject {
             let k = Self.dayKey(day)
             var stat = window[k] ?? DayStat(day: day)
             let tokens = e.inputTokens + e.outputTokens
-            if e.provider == .claude { stat.claude += tokens } else { stat.ollama += tokens }
+            switch e.provider {
+            case .claudeCode: stat.claude += tokens
+            case .codex: stat.codex += tokens
+            case .ollama: stat.ollama += tokens
+            }
             window[k] = stat
         }
 
@@ -432,6 +463,7 @@ final class UsageStore: ObservableObject {
             var stat = window[k] ?? DayStat(day: day)
             if let h = history[k] {
                 stat.claude += h.claude
+                stat.codex += h.codex
                 stat.ollama += h.ollama
             }
             out.append(stat)
@@ -442,6 +474,9 @@ final class UsageStore: ObservableObject {
     private func sessionTitle(for key: String, sample e: UsageEvent) -> String {
         if e.source == .proxy { return "Ollama (direct)" }
         if let name = sessionNames[key] { return name }
+        if e.provider == .codex {
+            return e.projectName.map { "Codex · \($0)" } ?? "Codex session \(String(key.prefix(8)))"
+        }
         return "Session \(String(key.prefix(8)))"
     }
 

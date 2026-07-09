@@ -6,9 +6,12 @@ final class AppServices {
 
     let store: UsageStore
     let watcher: TranscriptWatcher
+    let codexWatcher: CodexTranscriptWatcher
     let proxy: OllamaProxy
     let ollamaStatus: OllamaStatusPoller
     let limits: LimitsManager
+    let openAILimits: OpenAILimitsManager
+    let chatGPTLimits: ChatGPTLimitsManager
     let status: StatusManager
     let appearance: AppearanceWatcher
 
@@ -16,16 +19,21 @@ final class AppServices {
         let s = UsageStore()
         store = s
         watcher = TranscriptWatcher(store: s)
+        openAILimits = OpenAILimitsManager()
+        codexWatcher = CodexTranscriptWatcher(store: s, limits: openAILimits)
         proxy = OllamaProxy(store: s)
         ollamaStatus = OllamaStatusPoller(store: s)
         limits = LimitsManager()
+        chatGPTLimits = ChatGPTLimitsManager()
         status = StatusManager()
         appearance = AppearanceWatcher()
         Notifier.requestAuthorization()
         watcher.start()
+        codexWatcher.start()
         proxy.start()
         ollamaStatus.start()
         limits.start()
+        chatGPTLimits.start()
         status.start()
         FileLog.log("TokenScope started")
     }
@@ -41,6 +49,8 @@ struct TokenScopeApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @StateObject private var store = AppServices.shared.store
     @StateObject private var limits = AppServices.shared.limits
+    @StateObject private var openAILimits = AppServices.shared.openAILimits
+    @StateObject private var chatGPTLimits = AppServices.shared.chatGPTLimits
     @StateObject private var status = AppServices.shared.status
     @StateObject private var appearance = AppServices.shared.appearance
     // Which fields the menu bar shows: any of session,weekly,tokens.
@@ -48,7 +58,8 @@ struct TokenScopeApp: App {
 
     var body: some Scene {
         MenuBarExtra {
-            MenuView(store: store, limits: limits, status: status)
+            MenuView(store: store, limits: limits, openAILimits: openAILimits,
+                     chatGPTLimits: chatGPTLimits, status: status)
         } label: {
             // ONE image — the menu bar reliably renders a single Image but drops
             // elements from a multi-part label and strips text color.

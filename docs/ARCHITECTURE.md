@@ -1,7 +1,7 @@
 # TokenScope Architecture
 
-macOS menu bar app measuring LLM token usage across two providers (Claude /
-Anthropic and Ollama), built as a SwiftPM executable with SwiftUI `MenuBarExtra`.
+macOS menu bar app measuring local LLM token usage across Claude Code, Codex, and
+Ollama, built as a SwiftPM executable with SwiftUI `MenuBarExtra`.
 No third-party dependencies.
 
 ```
@@ -9,6 +9,7 @@ No third-party dependencies.
         │                                        │  ~/.claude/projects/   │
         └── writes transcripts ────────────────► │  **/*.jsonl            │
                                                  └──────────┬─────────────┘
+   Codex app / CLI ──► ~/.codex/sessions/**/*.jsonl ────────┤
    Claude Code ──┐                                          │ tail (1s poll)
    ollama run ───┤                                          ▼
    any client ───┴─► 127.0.0.1:11435 ─────────►  ┌──────────────────────┐
@@ -43,7 +44,15 @@ JSON-decoding. It also extracts session titles: `{"type":"summary","summary":…
 lines (authoritative) and the first real user message (fallback, 60-char cap,
 skipping `<command-…>`/`Caveat:`/meta lines).
 
-**2. Local proxy** (`OllamaProxy` → `Relay` → `ResponseScanner`). A transparent
+**2. Codex session telemetry** (`CodexTranscriptWatcher`). Codex records
+`event_msg` / `token_count` lines in `~/.codex/sessions/**/*.jsonl`. The watcher
+uses the same complete-line and hot-file polling discipline as `TranscriptWatcher`
+but decodes only those records. `last_token_usage` becomes an exact local event;
+cached and reasoning counts are retained as details, not double-counted in the
+headline. `rate_limits.primary` and `secondary` feed the observed Codex quota card.
+No prompt, reply, or tool payload is stored by TokenScope.
+
+**3. Local proxy** (`OllamaProxy` → `Relay` → `ResponseScanner`). A transparent
 TCP relay `127.0.0.1:11435 → 127.0.0.1:11434`. Bytes pass through unmodified
 except request `Accept-Encoding` headers are forced to `identity`. The response
 direction is tapped by a per-connection `ResponseScanner` that splits on
@@ -64,10 +73,10 @@ usage-bearing line falls back to regex extraction. Calls with zero output
 This is the only source that sees tokens **while they stream**, and the only
 one that sees non-Claude-Code Ollama clients (`OLLAMA_HOST=127.0.0.1:11435`).
 
-**3. `/api/ps` poller** (`OllamaStatusPoller`): every 10s, which model(s) are
+**4. `/api/ps` poller** (`OllamaStatusPoller`): every 10s, which model(s) are
 resident in Ollama's memory + VRAM, for the "Now" zone.
 
-**4. Plan limits** (`LimitsManager`): polls `claude.ai/api/organizations/{orgId}/usage`
+**5. claude.ai plan limits** (`LimitsManager`): polls `claude.ai/api/organizations/{orgId}/usage`
 every 5 min using the user's claude.ai Cookie header (pasted in Settings, stored
 in app preferences). Parses `five_hour` / `seven_day` / `seven_day_sonnet`
 `utilization` (%) + `resets_at`. Org ID comes from the `lastActiveOrg` cookie
@@ -77,7 +86,12 @@ Unofficial endpoint — degrades gracefully (no cookie → connect prompt;
 weekly 50/75/90%) via `ThresholdTracker`, which fires each band once per climb
 and re-arms on drop. Adapted from github.com/Artzainnn/ClaudeUsageBar.
 
-**5. Service status** (`StatusManager`): polls the public
+**6. ChatGPT web limits** (`ChatGPTLimitsManager`): an opt-in, private endpoint
+adapter using a pasted ChatGPT Cookie header. It recognizes returned percentage,
+duration, and reset concepts without fabricating token totals. It is isolated from
+local telemetry because the web response can change independently.
+
+**7. Service status** (`StatusManager`): polls the public
 `status.claude.com/api/v2/summary.json` (no auth) every 5 min for the overall
 indicator, non-operational components, and active incidents; notifies on
 indicator transitions. Answers "is it me or is Claude down?".
@@ -104,8 +118,9 @@ identifier so the bare `--snapshot` binary doesn't raise an NSException).
   Startup: `replayFinished` sorts events and re-reconciles persisted proxy
   events against replayed transcripts (±2 tokens, ±120s). Shadowed events are
   excluded from every aggregate but kept for the call log.
-- **Dedup**: transcript events dedup on `message.id:requestId` (first wins);
-  streaming rewrites repeat messages across lines.
+- **Dedup**: Claude Code transcript events dedup on `message.id:requestId` (first
+  wins); Codex events dedup by source-file byte offset; streaming rewrites repeat
+  messages across lines.
 - Aggregates (`totals`, `modelTotals`, `sessions`, `dailyTotals`,
   `hourlyTotals`, `heatmapDays`) are computed on demand over the window —
   no materialized caches to invalidate.
@@ -116,8 +131,9 @@ The information architecture separates by **scope**, because the app reports two
 things that share neither units, window, nor source:
 - **claude.ai plan limits** — account-wide utilization % (covers claude.ai web +
   desktop + Claude Code; excludes Ollama), 5h/7d rolling windows.
-- **Local token usage** — exact token counts from Claude Code transcripts +
-  Ollama on this Mac (excludes claude.ai web/desktop; includes Ollama).
+- **Local token usage** — exact token counts from Claude Code transcripts, Codex
+  session telemetry, and Ollama on this Mac (excludes claude.ai and ChatGPT web/
+  desktop; includes Ollama).
 
 So **Limits lives in an always-visible header** above the tabs (labeled "whole
 account · web + desktop + Code"), NOT in a tab — its scope/unit differ from the

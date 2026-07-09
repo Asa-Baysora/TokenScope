@@ -237,7 +237,7 @@ final class TranscriptWatcher {
         let ts = line.timestamp.flatMap { Self.isoFrac.date(from: $0) ?? Self.iso.date(from: $0) } ?? Date()
         let event = UsageEvent(
             timestamp: ts,
-            provider: TokenProvider.classify(model: model),
+            provider: UsageOrigin.classifyClaudeCode(model: model),
             source: .transcript,
             model: model,
             sessionId: line.sessionId ?? file.deletingPathExtension().lastPathComponent,
@@ -245,7 +245,8 @@ final class TranscriptWatcher {
             inputTokens: usage.input_tokens ?? 0,
             outputTokens: usage.output_tokens ?? 0,
             cacheReadTokens: usage.cache_read_input_tokens ?? 0,
-            cacheCreationTokens: usage.cache_creation_input_tokens ?? 0)
+            cacheCreationTokens: usage.cache_creation_input_tokens ?? 0,
+            reasoningTokens: 0)
 
         // Streaming writes can repeat a message across lines; first occurrence wins.
         let key = "\(msg.id ?? UUID().uuidString):\(line.requestId ?? "")"

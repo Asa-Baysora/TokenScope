@@ -1,8 +1,8 @@
 # TokenScope
 
-macOS menu bar app showing live LLM token usage — per call, per session, per day —
-for both **native Claude (Claude Code)** and **Ollama**, plus your **claude.ai plan
-limits** and **Anthropic service status**.
+macOS menu bar app showing local LLM token usage — per call, per session, per day —
+for **Claude Code**, **Codex**, and **Ollama**, plus optional **claude.ai** and
+experimental **ChatGPT** plan-limit views and Anthropic service status.
 
 ## How it measures
 
@@ -16,7 +16,12 @@ Token usage comes from two independent sources, reconciled automatically:
    transcripts so the day's history is populated immediately. Session names are
    Claude Code's own auto-generated titles (the ones you see in `/resume`).
 
-2. **Local Ollama proxy** (`127.0.0.1:11435 → 127.0.0.1:11434`). A transparent TCP
+2. **Codex session telemetry** (`~/.codex/sessions/**/*.jsonl`). TokenScope reads
+   only Codex `token_count` records: input, cached input, output, reasoning-output,
+   and the currently observed quota windows. Prompts, replies, and tool payloads are
+   never retained. This covers local Codex app/CLI sessions without a Cookie.
+
+3. **Local Ollama proxy** (`127.0.0.1:11435 → 127.0.0.1:11434`). A transparent TCP
    relay that parses token counts out of responses as they stream — Ollama-native,
    OpenAI-format, and Anthropic-format alike. This is what gives you the **live,
    while-it's-generating** counter, and it captures Ollama clients that aren't
@@ -27,13 +32,18 @@ Token usage comes from two independent sources, reconciled automatically:
 Two more panels track things tokens alone don't tell you (features adapted from
 [ClaudeUsageBar](https://github.com/Artzainnn/ClaudeUsageBar)):
 
-3. **Plan limits** (optional). Paste your claude.ai Cookie header in Settings and
+4. **claude.ai plan limits** (optional). Paste your claude.ai Cookie header in Settings and
    the Now tab shows your 5-hour session and 7-day weekly utilization as
    color-coded bars with reset countdowns, and alerts you at 25/50/75/90%. This is
    the "how close am I to being throttled" view. Uses an unofficial claude.ai
    endpoint; the cookie is stored locally and sent only to claude.ai.
 
-4. **Service status**. Polls Anthropic's public status page so you can tell "is it
+5. **ChatGPT web limits** (experimental, optional). Paste a ChatGPT Cookie header
+   and TokenScope queries ChatGPT's private usage surface for whatever limit windows
+   it returns. This is intentionally limits-only: ChatGPT web conversations do not
+   provide a reliable local per-chat token transcript. The endpoint may change.
+
+6. **Service status**. Polls Anthropic's public status page so you can tell "is it
    me, or is Claude down?" — shown in the footer, with optional change alerts.
 
 ## Build & run
@@ -90,17 +100,17 @@ The window separates the two things it measures by **scope**:
   with a Stacked ↔ Grouped toggle, "Hide weekends" filter, and a dashed kernel-
   regression trendline; provider totals with per-model breakdown; sessions (green
   dot = active in the last 15 min; named with Claude Code's own `/resume` titles).
-- **History** — GitHub-style 6-month heatmap with month labels. Cell hue mixes the
-  provider colors by that day's share (orange = all Claude, blue = all Ollama);
+- **History** — GitHub-style 6-month heatmap with month labels. Cell hue marks the
+  dominant local source (orange = Claude Code, purple = Codex, blue = Ollama);
   opacity carries the day's volume. Days that age out of the 31-day live window
   fold permanently into `daily-history.json`, which outlives Claude Code's own
   transcript cleanup, so this fills in over time.
-- **Settings** — paste your claude.ai Cookie header; choose what the **menu bar
+- **Settings** — paste claude.ai and optional ChatGPT Cookie headers; choose what the **menu bar
   shows** (any of session limit %, weekly limit %, daily token count); toggle
   limit/status notifications; and show/hide any section.
 
-The title-bar headline shows today's tokens split by provider (orange Claude /
-blue Ollama) rather than one merged total.
+The title-bar headline shows today's local tokens split by source (orange Claude
+Code / purple Codex / blue Ollama) rather than one merged total.
 
 The **footer** (always visible) shows Anthropic service status on the left and the
 proxy on the right. The **menu bar gauge** tints green/yellow/red to your nearest
@@ -129,3 +139,6 @@ Events are also appended to `~/Library/Logs/TokenScope.log` for debugging.
 - "Native Claude" per-call usage appears when each message completes — the
   Anthropic API only reports usage in the response, so there is no mid-call
   counter for direct Anthropic traffic.
+- Codex token counts are observed from local session telemetry. ChatGPT web limits
+  are an unsupported Cookie-based integration and may need reconnecting after web
+  changes or session expiry.
