@@ -115,9 +115,9 @@ struct MenuView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             titleBar.padding(.bottom, 8)
-            if activeTab != .settings {
-                accountLimitsHeader.padding(.bottom, 10)
-            }
+            // Shown on every tab (including Settings) so the tab bar keeps a fixed
+            // vertical position — it used to jump when this header was hidden.
+            accountLimitsHeader.padding(.bottom, 10)
             tabBar.padding(.bottom, 10)
             content
             Divider().padding(.vertical, 8)
@@ -944,6 +944,14 @@ struct MenuView: View {
                 set: { openAILimits.setMonitoring($0) }))
                 .font(.system(size: 11.5))
                 .toggleStyle(.checkbox).controlSize(.small)
+            // Codex has no cookie/connection like Claude — it just reads local
+            // files — so mirror Claude's status line with an "Active" indicator.
+            if openAILimits.monitoringEnabled {
+                HStack(spacing: 6) {
+                    Image(systemName: "checkmark.circle.fill").foregroundStyle(.green).font(.system(size: 11))
+                    Text("Active — reading local sessions").font(.system(size: 11.5))
+                }
+            }
             Text("Reads only token_count telemetry in ~/.codex/sessions. Prompts, replies, and tool data are not stored by TokenScope.")
                 .font(.system(size: 9.5)).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)

@@ -14,13 +14,14 @@ final class ProviderPalette: ObservableObject {
     static let shared = ProviderPalette()
     private let defaults = UserDefaults.standard
 
-    /// Concrete sRGB defaults (resolve identically in the headless binary, unlike
-    /// system `.orange`/`.purple`/`.blue`). Chosen to keep the heatmap visually
-    /// unchanged by default while unifying the marks/bars onto one palette.
-    private static let fallback: [UsageOrigin: (Double, Double, Double)] = [
-        .claudeCode: (0.96, 0.58, 0.20),
-        .codex:      (0.69, 0.32, 0.87),
-        .ollama:     (0.35, 0.62, 0.98),
+    /// Concrete sRGB defaults, kept byte-identical to the first three preset
+    /// swatches in the picker so each provider's default color highlights its
+    /// swatch out of the box (hex resolves identically in the headless binary,
+    /// unlike system `.orange`/`.purple`/`.blue`).
+    private static let fallbackHex: [UsageOrigin: String] = [
+        .claudeCode: "#F5942E",
+        .codex:      "#B052DE",
+        .ollama:     "#5A9EFA",
     ]
 
     private func key(_ o: UsageOrigin) -> String {
@@ -33,8 +34,7 @@ final class ProviderPalette: ObservableObject {
 
     func color(_ o: UsageOrigin) -> Color {
         if let hex = defaults.string(forKey: key(o)), let c = Self.color(fromHex: hex) { return c }
-        let d = Self.fallback[o]!
-        return Color(.sRGB, red: d.0, green: d.1, blue: d.2, opacity: 1)
+        return Self.color(fromHex: Self.fallbackHex[o]!) ?? .gray
     }
 
     func setColor(_ c: Color, for o: UsageOrigin) {
