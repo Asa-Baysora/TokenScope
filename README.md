@@ -145,3 +145,23 @@ Events are also appended to `~/Library/Logs/TokenScope.log` for debugging.
 - Codex token counts are observed from local session telemetry. ChatGPT web limits
   are an unsupported Cookie-based integration and may need reconnecting after web
   changes or session expiry.
+- The claude.ai and ChatGPT limit features call each service's private,
+  undocumented web endpoints using your own session cookie (stored locally, sent
+  only to that service). They are unofficial, may break without notice, and such
+  use may be subject to those services' terms of service.
+
+## License
+
+TokenScope is released under the MIT License — see [LICENSE](LICENSE).
+
+Portions of the plan-limit tracking are adapted from
+[ClaudeUsageBar](https://github.com/Artzainnn/ClaudeUsageBar) (MIT), and the
+provider brand marks are rendered from [Simple Icons](https://simpleicons.org)
+(CC0-1.0). Full details in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
+
+## Trademarks
+
+Claude and Anthropic, ChatGPT and OpenAI, and Ollama — along with their
+respective logos — are trademarks of their respective owners. TokenScope is an
+independent, unaffiliated project, not endorsed by or associated with any of
+them; the names and marks are used only to identify each provider.
