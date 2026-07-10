@@ -16,6 +16,10 @@ final class ChatGPTLimitsManager: ObservableObject {
 
     private static let cookieKey = "chatgpt_session_cookie"
     private let endpoint = URL(string: "https://chatgpt.com/backend-api/wham/usage")!
+    // The usage endpoint authenticates on a short-lived Bearer access token, NOT
+    // the cookie. The cookie authenticates /api/auth/session, which mints that
+    // token — so the user still pastes only the Cookie and we exchange it here.
+    private let sessionEndpoint = URL(string: "https://chatgpt.com/api/auth/session")!
 
     init() {
         cookie = UserDefaults.standard.string(forKey: Self.cookieKey) ?? ""
@@ -48,13 +52,47 @@ final class ChatGPTLimitsManager: ObservableObject {
 
     func refresh() {
         guard !cookie.isEmpty else { return }
+        // Two-step, mirroring the web app: the cookie mints a Bearer access token
+        // via /api/auth/session, then that token authorizes the usage call.
+        // (The usage endpoint rejects cookie-only auth with 401.)
+        fetchAccessToken { [weak self] token in
+            guard let self, let token else { return }
+            self.fetchUsage(bearer: token)
+        }
+    }
+
+    private func fetchAccessToken(_ completion: @escaping (String?) -> Void) {
+        var request = URLRequest(url: sessionEndpoint)
+        request.timeoutInterval = 15
+        applyBrowserHeaders(to: &request)
+        URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                if let error {
+                    self.errorMessage = "Network error: \(error.localizedDescription)"
+                    completion(nil); return
+                }
+                let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+                guard code == 200, let data,
+                      let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                    self.errorMessage = "Cookie rejected (expired?) — re-copy it"
+                    completion(nil); return
+                }
+                guard let token = obj["accessToken"] as? String, !token.isEmpty else {
+                    // 200 with no token = signed out for this cookie's session.
+                    self.errorMessage = "Signed out on chatgpt.com — open ChatGPT in the browser, then re-copy the Cookie"
+                    completion(nil); return
+                }
+                completion(token)
+            }
+        }.resume()
+    }
+
+    private func fetchUsage(bearer: String) {
         var request = URLRequest(url: endpoint)
         request.timeoutInterval = 15
-        request.setValue(cookie, forHTTPHeaderField: "Cookie")
-        request.setValue("*/*", forHTTPHeaderField: "Accept")
-        request.setValue("https://chatgpt.com", forHTTPHeaderField: "Origin")
-        request.setValue("https://chatgpt.com", forHTTPHeaderField: "Referer")
-        request.setValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36", forHTTPHeaderField: "User-Agent")
+        applyBrowserHeaders(to: &request)
+        request.setValue("Bearer \(bearer)", forHTTPHeaderField: "Authorization")
         URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
             guard let self else { return }
             DispatchQueue.main.async {
@@ -68,7 +106,7 @@ final class ChatGPTLimitsManager: ObservableObject {
                 }
                 guard response.statusCode == 200, let data else {
                     self.errorMessage = response.statusCode == 401 || response.statusCode == 403
-                        ? "Cookie rejected (expired?) — re-copy it"
+                        ? "ChatGPT rejected the request (session expired?) — re-copy the Cookie"
                         : "ChatGPT usage unavailable (HTTP \(response.statusCode))"
                     return
                 }
@@ -76,6 +114,20 @@ final class ChatGPTLimitsManager: ObservableObject {
             }
         }.resume()
     }
+
+    /// Headers common to both calls. The User-Agent must match the browser the
+    /// cookie was copied from — Cloudflare binds the `cf_clearance` cookie to the
+    /// UA that solved its challenge, so a mismatch triggers a fresh challenge.
+    private func applyBrowserHeaders(to request: inout URLRequest) {
+        request.setValue(cookie, forHTTPHeaderField: "Cookie")
+        request.setValue("*/*", forHTTPHeaderField: "Accept")
+        request.setValue("https://chatgpt.com", forHTTPHeaderField: "Origin")
+        request.setValue("https://chatgpt.com", forHTTPHeaderField: "Referer")
+        request.setValue(Self.userAgent, forHTTPHeaderField: "User-Agent")
+    }
+
+    // Current macOS Safari (the browser the cookie is expected to come from).
+    private static let userAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.5 Safari/605.1.15"
 
     /// The private response has changed across ChatGPT releases. Parse the
     /// stable concepts rather than pinning the app to one exact nesting shape:
