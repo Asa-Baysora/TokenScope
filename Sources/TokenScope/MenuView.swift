@@ -10,7 +10,7 @@ import AppKit
 ///   Now      — Limits (nearest rate-limit wall + reset), Live calls, Latest calls
 ///   Usage    — period-scoped chart, source/model totals, sessions
 ///   History  — 6-month activity heatmap
-///   Settings — claude.ai cookie, notifications, section visibility
+///   Settings — Sources (per-provider connections) / Display / Notifications
 struct MenuView: View {
     @ObservedObject var store: UsageStore
     @ObservedObject var limits: LimitsManager
@@ -38,6 +38,7 @@ struct MenuView: View {
     @AppStorage("SessionOriginFilter") private var sessionOriginFilterRaw = SessionOriginFilter.all.rawValue
     @State private var cookieDraft = ""
     @State private var chatGPTCookieDraft = ""
+    @State private var hexDraft: [String: String] = [:]   // per-provider hex field text
     @State private var contentHeight: CGFloat = 360
 
     /// Cap on the scroll viewport; tabs shorter than this shrink to fit (no dead
@@ -869,172 +870,271 @@ struct MenuView: View {
 
     // MARK: - Settings tab
 
+    // Grouped into three clusters — Sources (where each provider's data comes
+    // from), Display (how it's shown), and Notifications — so related controls
+    // sit together instead of the earlier scattered list.
     private var settingsView: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            VStack(alignment: .leading, spacing: 6) {
-                sectionTitle("claude.ai connection")
-                Text("Paste your claude.ai Cookie header to track plan limits. At claude.ai/settings/usage: DevTools → Network, refresh, click the \"usage\" request, copy the full Cookie request header.")
-                    .font(.system(size: 11)).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                if limits.connected {
-                    HStack(spacing: 6) {
-                        Image(systemName: "checkmark.circle.fill").foregroundStyle(.green).font(.system(size: 11))
-                        Text("Connected").font(.system(size: 11.5))
-                        if let err = limits.errorMessage {
-                            Text("· \(err)").font(.system(size: 11)).foregroundStyle(.orange).lineLimit(1)
-                        }
-                        Spacer()
-                        Button("Disconnect") { limits.clearCookie() }.font(.system(size: 11))
-                    }
-                }
-                HStack(spacing: 6) {
-                    SecureField("Cookie header value…", text: $cookieDraft)
-                        .textFieldStyle(.roundedBorder).font(.system(size: 11))
-                    Button("Save") { limits.setCookie(cookieDraft); cookieDraft = "" }
-                        .buttonStyle(.borderedProminent)
-                        .font(.system(size: 11))
-                        .disabled(cookieDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                }
-                Text("Stored locally in app preferences, sent only to claude.ai. Unofficial endpoint; may change.")
-                    .font(.system(size: 9.5)).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            VStack(alignment: .leading, spacing: 5) {
-                sectionTitle("Menu bar shows")
-                Toggle(isOn: menuBarBinding("session")) {
-                    Text("Session limit %  ").font(.system(size: 11.5))
-                    + Text("(5h, needs claude.ai)").font(.system(size: 9.5)).foregroundColor(.secondary)
-                }
-                Toggle(isOn: menuBarBinding("weekly")) {
-                    Text("Weekly limit %  ").font(.system(size: 11.5))
-                    + Text("(7d, needs claude.ai)").font(.system(size: 9.5)).foregroundColor(.secondary)
-                }
-                Toggle(isOn: menuBarBinding("chatgptPrimary")) {
-                    Text("Codex primary limit %  ").font(.system(size: 11.5))
-                    + Text("(local Codex)").font(.system(size: 9.5)).foregroundColor(.secondary)
-                }
-                Toggle(isOn: menuBarBinding("chatgptSecondary")) {
-                    Text("Codex secondary limit %  ").font(.system(size: 11.5))
-                    + Text("(local Codex)").font(.system(size: 9.5)).foregroundColor(.secondary)
-                }
-                Toggle(isOn: menuBarBinding("tokens")) {
-                    Text("Daily token count").font(.system(size: 11.5))
-                }
-                Text("Limit % is colored green / yellow / red by how close it is to the cap.")
-                    .font(.system(size: 9.5)).foregroundStyle(.secondary)
-            }
-            .toggleStyle(.checkbox).controlSize(.small)
-            VStack(alignment: .leading, spacing: 5) {
-                sectionTitle("Notifications")
-                Toggle("Claude limit thresholds — session 25/50/75/90%, weekly 50/75/90%",
-                       isOn: Binding(get: { limits.notificationsEnabled }, set: { limits.setNotifications($0) }))
-                Toggle("Codex limit thresholds — primary 25/50/75/90%, secondary 50/75/90%",
-                       isOn: Binding(get: { openAILimits.notificationsEnabled }, set: { openAILimits.setNotifications($0) }))
-                Toggle("Anthropic service status changes",
-                       isOn: Binding(get: { status.notificationsEnabled }, set: { status.setNotifications($0) }))
-                Toggle("OpenAI service status changes",
-                       isOn: Binding(get: { openAIStatus.notificationsEnabled }, set: { openAIStatus.setNotifications($0) }))
-            }
-            .toggleStyle(.checkbox).controlSize(.small).font(.system(size: 11.5))
-            VStack(alignment: .leading, spacing: 6) {
-                sectionTitle("Codex local usage")
-                Toggle("Monitor local Codex sessions", isOn: Binding(
-                    get: { openAILimits.monitoringEnabled },
-                    set: { openAILimits.setMonitoring($0) }))
-                    .font(.system(size: 11.5))
-                Text("Reads only token_count telemetry in ~/.codex/sessions. Prompts, replies, and tool data are not stored by TokenScope.")
-                    .font(.system(size: 9.5)).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            .toggleStyle(.checkbox).controlSize(.small)
-            VStack(alignment: .leading, spacing: 6) {
-                sectionTitle("ChatGPT connection · experimental")
-                Text("Paste your ChatGPT Cookie header to fetch web limit windows. This uses a private web endpoint, so it can expire or change without notice.")
-                    .font(.system(size: 11)).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                if chatGPTLimits.connected {
-                    HStack(spacing: 6) {
-                        Image(systemName: "checkmark.circle.fill").foregroundStyle(.green).font(.system(size: 11))
-                        Text("Cookie saved").font(.system(size: 11.5))
-                        if let error = chatGPTLimits.errorMessage {
-                            Text("· \(error)").font(.system(size: 11)).foregroundStyle(.orange).lineLimit(1)
-                        }
-                        Spacer()
-                        Button("Disconnect") { chatGPTLimits.clearCookie() }.font(.system(size: 11))
-                    }
-                }
-                HStack(spacing: 6) {
-                    SecureField("ChatGPT Cookie header value…", text: $chatGPTCookieDraft)
-                        .textFieldStyle(.roundedBorder).font(.system(size: 11))
-                    Button("Save") { chatGPTLimits.setCookie(chatGPTCookieDraft); chatGPTCookieDraft = "" }
-                        .buttonStyle(.borderedProminent).font(.system(size: 11))
-                        .disabled(chatGPTCookieDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                }
-                Text("Stored locally in app preferences and sent only to chatgpt.com. It reports only limits returned by ChatGPT, not invented per-chat token totals.")
-                    .font(.system(size: 9.5)).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            VStack(alignment: .leading, spacing: 6) {
-                sectionTitle("Ollama proxy")
-                Text("TokenScope routes Ollama (and Claude-Code-via-Ollama) traffic through a local proxy so it can meter tokens as they stream. Point clients at it with the env vars below.")
-                    .font(.system(size: 11)).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                HStack(spacing: 6) {
-                    Circle().fill(store.proxyHealthy ? Color.green : Color.red).frame(width: 7, height: 7)
-                    Text(store.proxyHealthy ? "Running on port \(store.proxyPort)" : "Proxy down")
-                        .font(.system(size: 11.5))
-                    Spacer()
-                    Button("Copy Ollama env") { copyEnv() }
-                        .font(.system(size: 11))
-                        .help("Copies the env vars that point Claude Code at Ollama through the proxy")
-                }
-            }
-            VStack(alignment: .leading, spacing: 5) {
-                sectionTitle("Usage chart")
-                Toggle("Include cached tokens in chart bars", isOn: $chartIncludeCache)
-                    .font(.system(size: 11.5))
-                Text("Cache reads/writes are context the model actually processed each call and usually dwarf fresh input. Off = fresh input + output only.")
-                    .font(.system(size: 9.5)).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            .toggleStyle(.checkbox).controlSize(.small)
-            VStack(alignment: .leading, spacing: 6) {
-                HStack {
-                    sectionTitle("Provider colors")
-                    Spacer()
-                    Button("Reset") { palette.resetAll() }
-                        .font(.system(size: 11)).disabled(palette.isDefault)
-                }
-                ForEach(UsageOrigin.allCases, id: \.rawValue) { o in
-                    HStack(spacing: 8) {
-                        BrandMarkView(origin: o, size: 15)
-                        ColorPicker(o.displayName, selection: paletteBinding(o), supportsOpacity: false)
-                            .font(.system(size: 11.5))
-                    }
-                }
-                Text("Used for the brand marks, the Usage bar chart, the History heatmap (mixed-usage days blend these by token share), and the menu-bar gauges.")
-                    .font(.system(size: 9.5)).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            VStack(alignment: .leading, spacing: 5) {
-                sectionTitle("Show sections")
-                ForEach(AppSection.allCases) { s in
-                    Toggle(isOn: Binding(get: { !isHidden(s) }, set: { _ in toggleHidden(s) })) {
-                        Text("\(s.title)  ").font(.system(size: 11.5))
-                        + Text(tabFor(s).title).font(.system(size: 9.5)).foregroundColor(.secondary)
-                    }
-                }
-            }
-            .toggleStyle(.checkbox).controlSize(.small)
+        VStack(alignment: .leading, spacing: 12) {
+            clusterHeader("Sources")
+            claudeSourceGroup
+            codexSourceGroup
+            chatGPTSourceGroup
+            ollamaSourceGroup
+
+            clusterHeader("Display")
+            menuBarGroup
+            usageChartGroup
+            providerColorsGroup
+            showSectionsGroup
+
+            clusterHeader("Notifications")
+            notificationsGroup
         }
     }
+
+    /// Bold label + trailing rule marking a top-level settings cluster.
+    private func clusterHeader(_ title: String) -> some View {
+        HStack(spacing: 8) {
+            Text(title.uppercased())
+                .font(.system(size: 11, weight: .bold))
+                .foregroundStyle(.secondary)
+            VStack { Divider() }
+        }
+        .padding(.top, 4)
+    }
+
+    // MARK: Sources
+
+    private var claudeSourceGroup: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            sectionTitle("Claude — plan limits")
+            Text("Paste your claude.ai Cookie header to track session & weekly plan limits. At claude.ai/settings/usage: DevTools → Network, refresh, click the \"usage\" request, copy the full Cookie request header.")
+                .font(.system(size: 11)).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            if limits.connected {
+                HStack(spacing: 6) {
+                    Image(systemName: "checkmark.circle.fill").foregroundStyle(.green).font(.system(size: 11))
+                    Text("Connected").font(.system(size: 11.5))
+                    if let err = limits.errorMessage {
+                        Text("· \(err)").font(.system(size: 11)).foregroundStyle(.orange).lineLimit(1)
+                    }
+                    Spacer()
+                    Button("Disconnect") { limits.clearCookie() }.font(.system(size: 11))
+                }
+            }
+            HStack(spacing: 6) {
+                SecureField("Cookie header value…", text: $cookieDraft)
+                    .textFieldStyle(.roundedBorder).font(.system(size: 11))
+                Button("Save") { limits.setCookie(cookieDraft); cookieDraft = "" }
+                    .buttonStyle(.borderedProminent)
+                    .font(.system(size: 11))
+                    .disabled(cookieDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+            Text("Stored locally in app preferences, sent only to claude.ai. Unofficial endpoint; may change.")
+                .font(.system(size: 9.5)).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private var codexSourceGroup: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            sectionTitle("Codex — local usage")
+            Toggle("Monitor local Codex sessions", isOn: Binding(
+                get: { openAILimits.monitoringEnabled },
+                set: { openAILimits.setMonitoring($0) }))
+                .font(.system(size: 11.5))
+                .toggleStyle(.checkbox).controlSize(.small)
+            Text("Reads only token_count telemetry in ~/.codex/sessions. Prompts, replies, and tool data are not stored by TokenScope.")
+                .font(.system(size: 9.5)).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private var chatGPTSourceGroup: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            sectionTitle("ChatGPT web · experimental")
+            Text("Paste your ChatGPT Cookie header to fetch web limit windows. This uses a private web endpoint, so it can expire or change without notice.")
+                .font(.system(size: 11)).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            if chatGPTLimits.connected {
+                HStack(spacing: 6) {
+                    Image(systemName: "checkmark.circle.fill").foregroundStyle(.green).font(.system(size: 11))
+                    Text("Cookie saved").font(.system(size: 11.5))
+                    if let error = chatGPTLimits.errorMessage {
+                        Text("· \(error)").font(.system(size: 11)).foregroundStyle(.orange).lineLimit(1)
+                    }
+                    Spacer()
+                    Button("Disconnect") { chatGPTLimits.clearCookie() }.font(.system(size: 11))
+                }
+            }
+            HStack(spacing: 6) {
+                SecureField("ChatGPT Cookie header value…", text: $chatGPTCookieDraft)
+                    .textFieldStyle(.roundedBorder).font(.system(size: 11))
+                Button("Save") { chatGPTLimits.setCookie(chatGPTCookieDraft); chatGPTCookieDraft = "" }
+                    .buttonStyle(.borderedProminent).font(.system(size: 11))
+                    .disabled(chatGPTCookieDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+            Text("Stored locally in app preferences and sent only to chatgpt.com. It reports only limits returned by ChatGPT, not invented per-chat token totals.")
+                .font(.system(size: 9.5)).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private var ollamaSourceGroup: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            sectionTitle("Ollama proxy")
+            Text("TokenScope routes Ollama (and Claude-Code-via-Ollama) traffic through a local proxy so it can meter tokens as they stream. Point clients at it with the env vars below.")
+                .font(.system(size: 11)).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: 6) {
+                Circle().fill(store.proxyHealthy ? Color.green : Color.red).frame(width: 7, height: 7)
+                Text(store.proxyHealthy ? "Running on port \(store.proxyPort)" : "Proxy down")
+                    .font(.system(size: 11.5))
+                Spacer()
+                Button("Copy Ollama env") { copyEnv() }
+                    .font(.system(size: 11))
+                    .help("Copies the env vars that point Claude Code at Ollama through the proxy")
+            }
+        }
+    }
+
+    // MARK: Display
+
+    private var menuBarGroup: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            sectionTitle("Menu bar shows")
+            Toggle(isOn: menuBarBinding("session")) {
+                Text("Claude session limit %  ").font(.system(size: 11.5))
+                + Text("(5h, needs claude.ai)").font(.system(size: 9.5)).foregroundColor(.secondary)
+            }
+            Toggle(isOn: menuBarBinding("weekly")) {
+                Text("Claude weekly limit %  ").font(.system(size: 11.5))
+                + Text("(7d, needs claude.ai)").font(.system(size: 9.5)).foregroundColor(.secondary)
+            }
+            Toggle(isOn: menuBarBinding("chatgptPrimary")) {
+                Text("Codex primary limit %  ").font(.system(size: 11.5))
+                + Text("(local Codex)").font(.system(size: 9.5)).foregroundColor(.secondary)
+            }
+            Toggle(isOn: menuBarBinding("chatgptSecondary")) {
+                Text("Codex secondary limit %  ").font(.system(size: 11.5))
+                + Text("(local Codex)").font(.system(size: 9.5)).foregroundColor(.secondary)
+            }
+            Toggle(isOn: menuBarBinding("tokens")) {
+                Text("Daily token count").font(.system(size: 11.5))
+            }
+            Text("Limit % is colored green / yellow / red by how close it is to the cap.")
+                .font(.system(size: 9.5)).foregroundStyle(.secondary)
+        }
+        .toggleStyle(.checkbox).controlSize(.small)
+    }
+
+    private var usageChartGroup: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            sectionTitle("Usage chart")
+            Toggle("Include cached tokens in chart & heatmap", isOn: $chartIncludeCache)
+                .font(.system(size: 11.5))
+                .toggleStyle(.checkbox).controlSize(.small)
+            Text("Cache reads/writes are context the model actually processed each call and usually dwarf fresh input. Off = fresh input + output only.")
+                .font(.system(size: 9.5)).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private var providerColorsGroup: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack {
+                sectionTitle("Provider colors")
+                Spacer()
+                Button("Reset") { palette.resetAll(); hexDraft = [:] }
+                    .font(.system(size: 11)).disabled(palette.isDefault)
+            }
+            ForEach(UsageOrigin.allCases, id: \.rawValue) { o in providerColorRow(o) }
+            Text("Used for the brand marks, the Usage bar chart, the History heatmap (mixed-usage days blend these by token share), and the menu-bar gauges. Tap a swatch or type a hex code.")
+                .font(.system(size: 9.5)).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private func providerColorRow(_ o: UsageOrigin) -> some View {
+        HStack(spacing: 6) {
+            BrandMarkView(origin: o, size: 15)
+            Text(o.displayName).font(.system(size: 11.5)).frame(width: 44, alignment: .leading)
+            ForEach(Self.presetSwatches, id: \.self) { hex in swatchButton(hex, for: o) }
+            Spacer(minLength: 6)
+            TextField("#RRGGBB", text: hexBinding(o))
+                .textFieldStyle(.roundedBorder)
+                .font(.system(size: 10, design: .monospaced))
+                .frame(width: 76)
+                .onSubmit { commitHex(o) }
+        }
+    }
+
+    private func swatchButton(_ hex: String, for o: UsageOrigin) -> some View {
+        let c = ProviderPalette.color(fromHex: hex) ?? .gray
+        let selected = ProviderPalette.hex(fromColor: palette.color(o)).caseInsensitiveCompare(hex) == .orderedSame
+        return Button {
+            palette.setColor(c, for: o)
+            hexDraft[o.rawValue] = hex.uppercased()
+        } label: {
+            Circle().fill(c).frame(width: 15, height: 15)
+                .overlay(Circle().strokeBorder(selected ? Color.primary : Color.primary.opacity(0.2),
+                                               lineWidth: selected ? 2 : 0.5))
+        }
+        .buttonStyle(.plain).help(hex)
+    }
+
+    private var showSectionsGroup: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            sectionTitle("Show sections")
+            ForEach(AppSection.allCases) { s in
+                Toggle(isOn: Binding(get: { !isHidden(s) }, set: { _ in toggleHidden(s) })) {
+                    Text("\(s.title)  ").font(.system(size: 11.5))
+                    + Text(tabFor(s).title).font(.system(size: 9.5)).foregroundColor(.secondary)
+                }
+            }
+        }
+        .toggleStyle(.checkbox).controlSize(.small)
+    }
+
+    // MARK: Notifications
+
+    private var notificationsGroup: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Toggle("Claude limit thresholds — session 25/50/75/90%, weekly 50/75/90%",
+                   isOn: Binding(get: { limits.notificationsEnabled }, set: { limits.setNotifications($0) }))
+            Toggle("Codex limit thresholds — primary 25/50/75/90%, secondary 50/75/90%",
+                   isOn: Binding(get: { openAILimits.notificationsEnabled }, set: { openAILimits.setNotifications($0) }))
+            Toggle("Anthropic service status changes",
+                   isOn: Binding(get: { status.notificationsEnabled }, set: { status.setNotifications($0) }))
+            Toggle("OpenAI service status changes",
+                   isOn: Binding(get: { openAIStatus.notificationsEnabled }, set: { openAIStatus.setNotifications($0) }))
+        }
+        .toggleStyle(.checkbox).controlSize(.small).font(.system(size: 11.5))
+    }
+
+    // A spread of presets so each provider can be set to a distinct hue with one
+    // tap; the hex field covers any exact color. No NSColorPanel (which dismisses
+    // the menu-bar popup), so this works inline.
+    private static let presetSwatches = [
+        "#F5942E", "#B052DE", "#5A9EFA", "#34C759", "#FF3B30", "#FF2D80", "#30C7C0",
+    ]
 
     private func menuBarBinding(_ id: String) -> Binding<Bool> {
         Binding(get: { listContains(menuBarItemsRaw, id) }, set: { _ in toggleInList(&menuBarItemsRaw, id) })
     }
 
-    private func paletteBinding(_ o: UsageOrigin) -> Binding<Color> {
-        Binding(get: { palette.color(o) }, set: { palette.setColor($0, for: o) })
+    private func hexBinding(_ o: UsageOrigin) -> Binding<String> {
+        Binding(get: { hexDraft[o.rawValue] ?? ProviderPalette.hex(fromColor: palette.color(o)) },
+                set: { hexDraft[o.rawValue] = $0 })
+    }
+
+    private func commitHex(_ o: UsageOrigin) {
+        if let c = ProviderPalette.color(fromHex: hexDraft[o.rawValue] ?? "") {
+            palette.setColor(c, for: o)
+            hexDraft[o.rawValue] = ProviderPalette.hex(fromColor: c)   // normalize
+        } else {
+            hexDraft[o.rawValue] = ProviderPalette.hex(fromColor: palette.color(o))   // revert invalid
+        }
     }
 
     private func tabFor(_ s: AppSection) -> Tab {
