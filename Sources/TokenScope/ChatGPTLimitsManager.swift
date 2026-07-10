@@ -13,6 +13,12 @@ final class ChatGPTLimitsManager: ObservableObject {
 
     private var cookie = ""
     private var timer: Timer?
+    // Shared with the local source: same notif preference + threshold bands, so
+    // whichever source is active fires the "Codex limit thresholds" alerts and
+    // switching sources doesn't re-fire an already-notified band.
+    private static let notificationKey = "chatgpt_limit_notifications_enabled"
+    private var sessionThreshold = ThresholdTracker(key: "chatgpt_limit_notified_primary", thresholds: [25, 50, 75, 90])
+    private var weeklyThreshold = ThresholdTracker(key: "chatgpt_limit_notified_secondary", thresholds: [50, 75, 90])
 
     private static let cookieKey = "chatgpt_session_cookie"
     private let endpoint = URL(string: "https://chatgpt.com/backend-api/wham/usage")!
@@ -27,10 +33,17 @@ final class ChatGPTLimitsManager: ObservableObject {
     }
 
     func start() {
+        guard timer == nil else { refresh(); return }
         timer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
             self?.refresh()
         }
         refresh()
+    }
+
+    /// Stop polling when the cookie is not the selected Codex source.
+    func stop() {
+        timer?.invalidate()
+        timer = nil
     }
 
     func setCookie(_ raw: String) {
@@ -170,7 +183,25 @@ final class ChatGPTLimitsManager: ObservableObject {
         errorMessage = windows.isEmpty
             ? "No recognized limits returned — ChatGPT's web response may have changed"
             : nil
+        maybeNotify()
         FileLog.log("chatgpt limits: \(windows.map { "\($0.id)=\(Int($0.utilization))%" }.joined(separator: " "))")
+    }
+
+    private func maybeNotify() {
+        let d = UserDefaults.standard
+        guard d.object(forKey: Self.notificationKey) == nil || d.bool(forKey: Self.notificationKey) else { return }
+        if let s = windows.first(where: { $0.id == "codex-primary" }),
+           let t = sessionThreshold.evaluate(percent: Int(s.utilization)) {
+            Notifier.post(title: s.label + " limit " + String(t) + "%",
+                          body: "You've used " + String(Int(s.utilization)) + "% of this Codex limit.",
+                          id: "codex-limit-primary-" + String(t))
+        }
+        if let w = windows.first(where: { $0.id == "codex-secondary" }),
+           let t = weeklyThreshold.evaluate(percent: Int(w.utilization)) {
+            Notifier.post(title: w.label + " limit " + String(t) + "%",
+                          body: "You've used " + String(Int(w.utilization)) + "% of this Codex limit.",
+                          id: "codex-limit-secondary-" + String(t))
+        }
     }
 
     private func collectRaw(_ value: Any, into output: inout [RawWindow]) {

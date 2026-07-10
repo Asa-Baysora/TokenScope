@@ -931,7 +931,17 @@ struct MenuView: View {
 
     private func codexMethodButton(_ label: String, _ value: String, suffix: String?) -> some View {
         let selected = codexUsesCookie == (value == "cookie")
-        return Button { codexSourceRaw = value } label: {
+        return Button {
+            codexSourceRaw = value
+            // Run only the selected source; stop the other's machinery entirely.
+            if value == "cookie" {
+                openAILimits.setMonitoring(false)   // stops the local watcher
+                chatGPTLimits.start()               // starts the cookie poller (+refresh)
+            } else {
+                openAILimits.setMonitoring(true)    // starts the local watcher
+                chatGPTLimits.stop()                // stops the cookie poller
+            }
+        } label: {
             HStack(spacing: 4) {
                 Text(label).font(.system(size: 10.5, weight: selected ? .semibold : .regular))
                 if let suffix { Text(suffix).font(.system(size: 9)).foregroundStyle(.secondary) }
@@ -949,13 +959,13 @@ struct MenuView: View {
     }
 
     @ViewBuilder private var codexCookieConfig: some View {
-        Text("Paste your ChatGPT Cookie header to fetch your account's usage windows. Works even when you use ChatGPT/Codex on the web or another device. Private endpoint — may change without notice.")
+        Text("Paste your chatgpt.com Cookie header to track session & weekly usage limits. At chatgpt.com: DevTools → Network, refresh, click the \"usage\" request, copy the full Cookie request header.")
             .font(.system(size: 11)).foregroundStyle(.secondary)
             .fixedSize(horizontal: false, vertical: true)
         if chatGPTLimits.connected {
             HStack(spacing: 6) {
                 Image(systemName: "checkmark.circle.fill").foregroundStyle(.green).font(.system(size: 11))
-                Text("Cookie saved").font(.system(size: 11.5))
+                Text("Connected").font(.system(size: 11.5))
                 if let error = chatGPTLimits.errorMessage {
                     Text("· \(error)").font(.system(size: 11)).foregroundStyle(.orange).lineLimit(1)
                 }
@@ -964,28 +974,21 @@ struct MenuView: View {
             }
         }
         HStack(spacing: 6) {
-            SecureField("ChatGPT Cookie header value…", text: $chatGPTCookieDraft)
+            SecureField("Cookie header value…", text: $chatGPTCookieDraft)
                 .textFieldStyle(.roundedBorder).font(.system(size: 11))
             Button("Save") { chatGPTLimits.setCookie(chatGPTCookieDraft); chatGPTCookieDraft = "" }
                 .buttonStyle(.borderedProminent).font(.system(size: 11))
                 .disabled(chatGPTCookieDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
         }
-        Text("Stored locally in app preferences and sent only to chatgpt.com. Copy it from Safari (DevTools → Network → a chatgpt.com request → Cookie).")
+        Text("Stored locally in app preferences, sent only to chatgpt.com. Unofficial endpoint; may change.")
             .font(.system(size: 9.5)).foregroundStyle(.secondary)
             .fixedSize(horizontal: false, vertical: true)
     }
 
     @ViewBuilder private var codexLocalConfig: some View {
-        Toggle("Monitor local Codex sessions", isOn: Binding(
-            get: { openAILimits.monitoringEnabled },
-            set: { openAILimits.setMonitoring($0) }))
-            .font(.system(size: 11.5))
-            .toggleStyle(.checkbox).controlSize(.small)
-        if openAILimits.monitoringEnabled {
-            HStack(spacing: 6) {
-                Image(systemName: "checkmark.circle.fill").foregroundStyle(.green).font(.system(size: 11))
-                Text("Active — reading local sessions").font(.system(size: 11.5))
-            }
+        HStack(spacing: 6) {
+            Image(systemName: "checkmark.circle.fill").foregroundStyle(.green).font(.system(size: 11))
+            Text("Active — reading local sessions").font(.system(size: 11.5))
         }
         Text("Reads only token_count telemetry in ~/.codex/sessions. Prompts, replies, and tool data are not stored by TokenScope.")
             .font(.system(size: 9.5)).foregroundStyle(.secondary)

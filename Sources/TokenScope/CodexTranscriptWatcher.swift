@@ -45,16 +45,9 @@ final class CodexTranscriptWatcher {
     }
 
     func start() {
-        queue.async { [weak self] in
-            self?.bootstrap()
-            self?.scan()
-            self?.finishBackfillIfNeeded()
-        }
-        let timer = DispatchSource.makeTimerSource(queue: queue)
-        timer.schedule(deadline: .now() + 3, repeating: 1)
-        timer.setEventHandler { [weak self] in self?.scan() }
-        timer.resume()
-        self.timer = timer
+        // Only run the file-scanning loop when local is the selected Codex source;
+        // otherwise register the observers and stay idle (no timer firing at all).
+        if enabled { startScanning() }
         monitorObserver = NotificationCenter.default.addObserver(
             forName: OpenAILimitsManager.monitoringChanged, object: nil, queue: nil
         ) { [weak self] _ in
@@ -84,17 +77,41 @@ final class CodexTranscriptWatcher {
 
     private var enabled: Bool { limits.monitoringEnabled }
 
+    private func startScanning() {
+        guard timer == nil else { return }
+        queue.async { [weak self] in
+            self?.bootstrap()
+            self?.scan()
+            self?.finishBackfillIfNeeded()
+        }
+        let t = DispatchSource.makeTimerSource(queue: queue)
+        t.schedule(deadline: .now() + 3, repeating: 1)
+        t.setEventHandler { [weak self] in self?.scan() }
+        t.resume()
+        timer = t
+    }
+
+    private func stopScanning() {
+        timer?.cancel()
+        timer = nil
+    }
+
     private func monitoringChanged() {
         guard enabled else {
-            FileLog.log("Codex transcript watcher paused")
+            stopScanning()
+            FileLog.log("Codex transcript watcher stopped (not the selected source)")
             return
         }
-        offsets = [:]
-        activePaths = []
-        tick = 0
-        bootstrap()
-        scan()
-        finishBackfillIfNeeded()
+        if timer == nil {
+            startScanning()
+        } else {
+            offsets = [:]
+            activePaths = []
+            tick = 0
+            bootstrap()
+            scan()
+            finishBackfillIfNeeded()
+        }
         FileLog.log("Codex transcript watcher resumed")
     }
 

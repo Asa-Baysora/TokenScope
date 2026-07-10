@@ -31,12 +31,21 @@ final class AppServices {
         openAIStatus = StatusManager(service: .openAI)
         appearance = AppearanceWatcher()
         Notifier.requestAuthorization()
+        // Codex has one active source. Default the choice (cookie if one is already
+        // connected, else local), then start ONLY that source so the other's
+        // machinery doesn't run in the background.
+        let defaults = UserDefaults.standard
+        if defaults.string(forKey: "CodexSource") == nil {
+            defaults.set(chatGPTLimits.connected ? "cookie" : "local", forKey: "CodexSource")
+        }
+        let codexCookie = defaults.string(forKey: "CodexSource") == "cookie"
+        openAILimits.monitoringEnabled = !codexCookie
         watcher.start()
-        codexWatcher.start()
+        codexWatcher.start()              // registers observers; scans only if local is active
         proxy.start()
         ollamaStatus.start()
         limits.start()
-        chatGPTLimits.start()
+        if codexCookie { chatGPTLimits.start() }   // poll only when cookie is the source
         status.start()
         openAIStatus.start()
         FileLog.log("TokenScope started")
