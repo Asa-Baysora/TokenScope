@@ -74,11 +74,12 @@ final class OpenAILimitsManager: ObservableObject {
             self.windows = candidates.compactMap { kind, window in
                 guard let window else { return nil }
                 let period = Self.duration(window.minutes)
-                // Role · duration, mirroring Claude's "Session · 5h" / "Weekly · 7d"
-                // (the "CODEX LIMITS" header already carries the provider name).
+                // Mirror Claude's "Session · 5h" / "Weekly · 7d" naming (the primary
+                // rolling window is the session; the longer one is weekly).
+                let role = kind == "primary" ? "Session" : "Weekly"
                 return LimitWindow(
                     id: "codex-\(kind)",
-                    label: "\(kind.capitalized) · \(period)",
+                    label: "\(role) · \(period)",
                     utilization: window.percent,
                     resetsAt: window.resetsAt,
                     period: period)

@@ -35,6 +35,10 @@ struct MenuView: View {
     @AppStorage("CollapsedSections") private var collapsedRaw = ""
     @AppStorage("HiddenSections") private var hiddenRaw = ""
     @AppStorage("MenuBarItems") private var menuBarItemsRaw = "tokens"
+    // How Codex usage is tracked: "local" (this Mac's ~/.codex sessions) or
+    // "cookie" (the ChatGPT web endpoint — comprehensive & always current). Empty
+    // = auto: prefer the cookie when one is connected, else local.
+    @AppStorage("CodexSource") private var codexSourceRaw = ""
     @AppStorage("SessionOriginFilter") private var sessionOriginFilterRaw = SessionOriginFilter.all.rawValue
     @State private var cookieDraft = ""
     @State private var chatGPTCookieDraft = ""
@@ -55,6 +59,18 @@ struct MenuView: View {
     private var sessionOriginFilter: SessionOriginFilter {
         SessionOriginFilter(rawValue: sessionOriginFilterRaw) ?? .all
     }
+
+    // Codex has two interchangeable sources; the header + menu bar read whichever
+    // one is active. With no explicit choice, auto-prefer the cookie when connected.
+    private var codexUsesCookie: Bool {
+        switch codexSourceRaw {
+        case "cookie": return true
+        case "local":  return false
+        default:       return chatGPTLimits.connected
+        }
+    }
+    private var codexConfigured: Bool { codexUsesCookie ? chatGPTLimits.connected : openAILimits.monitoringEnabled }
+    private var codexWindows: [LimitWindow] { codexUsesCookie ? chatGPTLimits.windows : openAILimits.windows }
 
     // Raw value stays "now" (persisted in AppStorage) though it's titled "Activity".
     enum Tab: String, CaseIterable, Identifiable {
@@ -282,14 +298,11 @@ struct MenuView: View {
 
     private var accountLimitsHeader: some View {
         VStack(alignment: .leading, spacing: 8) {
-            // Cookie-backed account cards stay out of the always-visible area
-            // until configured; Settings remains the explicit connection point.
+            // Cookie-backed Claude card stays hidden until configured; Settings is
+            // the explicit connection point.
             if limits.connected { limitsHeader }
+            // One Codex card, fed by the selected source (local or cookie).
             codexLimitsHeader
-            // ChatGPT is web-only and optional. Keep its connection workflow in
-            // Settings until a Cookie is present so always-visible account
-            // limits don't consume most of the menu's vertical real estate.
-            if chatGPTLimits.connected { chatGPTLimitsHeader }
         }
     }
 
@@ -342,27 +355,33 @@ struct MenuView: View {
                 Text("CODEX LIMITS")
                     .font(.system(size: 10, weight: .semibold)).foregroundStyle(.secondary)
                 Spacer()
-                Button { openAILimits.refresh() } label: {
+                Button { codexUsesCookie ? chatGPTLimits.refresh() : openAILimits.refresh() } label: {
                     Image(systemName: "arrow.clockwise").font(.system(size: 10, weight: .semibold))
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(.secondary)
-                .disabled(!openAILimits.monitoringEnabled)
-                .help("Refresh limits from local Codex sessions")
+                .disabled(!codexConfigured)
+                .help(codexUsesCookie ? "Refresh Codex limits from ChatGPT" : "Refresh limits from local Codex sessions")
             }
-            if !openAILimits.monitoringEnabled {
+            if !codexConfigured {
                 Button { activeTabRaw = Tab.settings.rawValue } label: {
                     HStack(spacing: 6) {
-                        Image(systemName: "gearshape").font(.system(size: 10))
-                        Text("Enable local Codex monitoring in Settings").font(.system(size: 11.5))
+                        Image(systemName: codexUsesCookie ? "link" : "gearshape").font(.system(size: 10))
+                        Text(codexUsesCookie ? "Connect ChatGPT to track Codex limits"
+                                             : "Enable Codex tracking in Settings").font(.system(size: 11.5))
                     }
                 }
                 .buttonStyle(.plain).foregroundStyle(.blue)
-            } else if openAILimits.windows.isEmpty {
-                Text("Awaiting a local Codex turn to report quota status.")
-                    .font(.system(size: 11)).foregroundStyle(.secondary)
+            } else if codexWindows.isEmpty {
+                HStack(spacing: 6) {
+                    Text(codexUsesCookie
+                         ? (chatGPTLimits.errorMessage ?? "Loading Codex limits…")
+                         : "Awaiting a local Codex turn to report quota status.")
+                        .font(.system(size: 11)).foregroundStyle(.secondary)
+                    if codexUsesCookie { chatGPTRefreshButton }
+                }
             } else {
-                ForEach(openAILimits.windows) { limitRow($0) }
+                ForEach(codexWindows) { limitRow($0) }
             }
         }
         .padding(11)
@@ -370,45 +389,6 @@ struct MenuView: View {
         .sectionCard(cornerRadius: 13)
     }
 
-    @ViewBuilder private var chatGPTLimitsHeader: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 6) {
-                Text("CHATGPT WEB LIMITS")
-                    .font(.system(size: 10, weight: .semibold)).foregroundStyle(.secondary)
-                Spacer()
-                if chatGPTLimits.connected, !chatGPTLimits.windows.isEmpty { chatGPTRefreshButton }
-            }
-            if !chatGPTLimits.connected {
-                Button { activeTabRaw = Tab.settings.rawValue; chatGPTCookieDraft = "" } label: {
-                    HStack(spacing: 6) {
-                        Image(systemName: "link").font(.system(size: 10))
-                        Text("Connect ChatGPT to track web limits").font(.system(size: 11.5))
-                    }
-                }
-                .buttonStyle(.plain).foregroundStyle(.blue)
-            } else if let error = chatGPTLimits.errorMessage, chatGPTLimits.windows.isEmpty {
-                // Only surface the error when there's nothing to show. A transient
-                // poll failure must not blank limits already fetched — keep the
-                // last-good windows and let the refresh button retry.
-                HStack(spacing: 6) {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .font(.system(size: 10)).foregroundStyle(.orange)
-                    Text(error).font(.system(size: 11)).foregroundStyle(.secondary)
-                    chatGPTRefreshButton
-                }
-            } else if chatGPTLimits.windows.isEmpty {
-                HStack(spacing: 6) {
-                    Text("Loading ChatGPT limits…").font(.system(size: 11)).foregroundStyle(.secondary)
-                    chatGPTRefreshButton
-                }
-            } else {
-                ForEach(chatGPTLimits.windows) { limitRow($0) }
-            }
-        }
-        .padding(11)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .sectionCard(cornerRadius: 13)
-    }
 
     private var refreshButton: some View {
         Button { limits.refresh() } label: {
@@ -878,7 +858,6 @@ struct MenuView: View {
             clusterHeader("Sources")
             claudeSourceGroup
             codexSourceGroup
-            chatGPTSourceGroup
             ollamaSourceGroup
 
             clusterHeader("Display")
@@ -936,57 +915,91 @@ struct MenuView: View {
         }
     }
 
+    // One "Codex" section: pick the Cookie method (comprehensive, always current)
+    // or the Local method (this Mac's Codex sessions only). Only one is used at a
+    // time and only its card shows in the header.
     private var codexSourceGroup: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            sectionTitle("Codex — local usage")
-            Toggle("Monitor local Codex sessions", isOn: Binding(
-                get: { openAILimits.monitoringEnabled },
-                set: { openAILimits.setMonitoring($0) }))
-                .font(.system(size: 11.5))
-                .toggleStyle(.checkbox).controlSize(.small)
-            // Codex has no cookie/connection like Claude — it just reads local
-            // files — so mirror Claude's status line with an "Active" indicator.
-            if openAILimits.monitoringEnabled {
-                HStack(spacing: 6) {
-                    Image(systemName: "checkmark.circle.fill").foregroundStyle(.green).font(.system(size: 11))
-                    Text("Active — reading local sessions").font(.system(size: 11.5))
-                }
+        VStack(alignment: .leading, spacing: 8) {
+            sectionTitle("Codex")
+            HStack(spacing: 3) {
+                codexMethodButton("Cookie", "cookie", suffix: "· recommended")
+                codexMethodButton("Local sessions", "local", suffix: nil)
             }
-            Text("Reads only token_count telemetry in ~/.codex/sessions. Prompts, replies, and tool data are not stored by TokenScope.")
-                .font(.system(size: 9.5)).foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
+            if codexUsesCookie { codexCookieConfig } else { codexLocalConfig }
         }
     }
 
-    private var chatGPTSourceGroup: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            sectionTitle("ChatGPT web · experimental")
-            Text("Paste your ChatGPT Cookie header to fetch web limit windows. This uses a private web endpoint, so it can expire or change without notice.")
-                .font(.system(size: 11)).foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-            if chatGPTLimits.connected {
-                HStack(spacing: 6) {
-                    Image(systemName: "checkmark.circle.fill").foregroundStyle(.green).font(.system(size: 11))
-                    Text("Cookie saved").font(.system(size: 11.5))
-                    if let error = chatGPTLimits.errorMessage {
-                        Text("· \(error)").font(.system(size: 11)).foregroundStyle(.orange).lineLimit(1)
-                    }
-                    Spacer()
-                    Button("Disconnect") { chatGPTLimits.clearCookie() }.font(.system(size: 11))
-                }
+    private func codexMethodButton(_ label: String, _ value: String, suffix: String?) -> some View {
+        let selected = codexUsesCookie == (value == "cookie")
+        return Button { codexSourceRaw = value } label: {
+            HStack(spacing: 4) {
+                Text(label).font(.system(size: 10.5, weight: selected ? .semibold : .regular))
+                if let suffix { Text(suffix).font(.system(size: 9)).foregroundStyle(.secondary) }
             }
+            .padding(.horizontal, 8).padding(.vertical, 3)
+            .background(RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(selected ? Color.accentColor.opacity(0.18) : Color.primary.opacity(0.05)))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(selected ? Color.accentColor : .secondary)
+        .help(value == "local"
+              ? "Local only updates while Codex runs on this Mac. The Cookie method tracks your whole account and stays current across the web and other devices."
+              : "Fetches your account's usage windows via the ChatGPT cookie — comprehensive and always current. Recommended.")
+    }
+
+    @ViewBuilder private var codexCookieConfig: some View {
+        Text("Paste your ChatGPT Cookie header to fetch your account's usage windows. Works even when you use ChatGPT/Codex on the web or another device. Private endpoint — may change without notice.")
+            .font(.system(size: 11)).foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+        if chatGPTLimits.connected {
             HStack(spacing: 6) {
-                SecureField("ChatGPT Cookie header value…", text: $chatGPTCookieDraft)
-                    .textFieldStyle(.roundedBorder).font(.system(size: 11))
-                Button("Save") { chatGPTLimits.setCookie(chatGPTCookieDraft); chatGPTCookieDraft = "" }
-                    .buttonStyle(.borderedProminent).font(.system(size: 11))
-                    .disabled(chatGPTCookieDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                Image(systemName: "checkmark.circle.fill").foregroundStyle(.green).font(.system(size: 11))
+                Text("Cookie saved").font(.system(size: 11.5))
+                if let error = chatGPTLimits.errorMessage {
+                    Text("· \(error)").font(.system(size: 11)).foregroundStyle(.orange).lineLimit(1)
+                }
+                Spacer()
+                Button("Disconnect") { chatGPTLimits.clearCookie() }.font(.system(size: 11))
             }
-            Text("Stored locally in app preferences and sent only to chatgpt.com. It reports only limits returned by ChatGPT, not invented per-chat token totals.")
+        }
+        HStack(spacing: 6) {
+            SecureField("ChatGPT Cookie header value…", text: $chatGPTCookieDraft)
+                .textFieldStyle(.roundedBorder).font(.system(size: 11))
+            Button("Save") { chatGPTLimits.setCookie(chatGPTCookieDraft); chatGPTCookieDraft = "" }
+                .buttonStyle(.borderedProminent).font(.system(size: 11))
+                .disabled(chatGPTCookieDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        }
+        Text("Stored locally in app preferences and sent only to chatgpt.com. Copy it from Safari (DevTools → Network → a chatgpt.com request → Cookie).")
+            .font(.system(size: 9.5)).foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
+    @ViewBuilder private var codexLocalConfig: some View {
+        Toggle("Monitor local Codex sessions", isOn: Binding(
+            get: { openAILimits.monitoringEnabled },
+            set: { openAILimits.setMonitoring($0) }))
+            .font(.system(size: 11.5))
+            .toggleStyle(.checkbox).controlSize(.small)
+        if openAILimits.monitoringEnabled {
+            HStack(spacing: 6) {
+                Image(systemName: "checkmark.circle.fill").foregroundStyle(.green).font(.system(size: 11))
+                Text("Active — reading local sessions").font(.system(size: 11.5))
+            }
+        }
+        Text("Reads only token_count telemetry in ~/.codex/sessions. Prompts, replies, and tool data are not stored by TokenScope.")
+            .font(.system(size: 9.5)).foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+        HStack(alignment: .top, spacing: 6) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 10)).foregroundStyle(.orange)
+            Text("Only updates while Codex is running on this Mac — it won't include ChatGPT/Codex usage from the web or other devices. Use the Cookie method for comprehensive, always-current tracking.")
                 .font(.system(size: 9.5)).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
+        .help("Switch to the Cookie method above for comprehensive, always-current Codex tracking.")
     }
+
 
     private var ollamaSourceGroup: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -1020,12 +1033,12 @@ struct MenuView: View {
                 + Text("(7d, needs claude.ai)").font(.system(size: 9.5)).foregroundColor(.secondary)
             }
             Toggle(isOn: menuBarBinding("chatgptPrimary")) {
-                Text("Codex primary limit %  ").font(.system(size: 11.5))
-                + Text("(local Codex)").font(.system(size: 9.5)).foregroundColor(.secondary)
+                Text("Codex session limit %  ").font(.system(size: 11.5))
+                + Text("(5h)").font(.system(size: 9.5)).foregroundColor(.secondary)
             }
             Toggle(isOn: menuBarBinding("chatgptSecondary")) {
-                Text("Codex secondary limit %  ").font(.system(size: 11.5))
-                + Text("(local Codex)").font(.system(size: 9.5)).foregroundColor(.secondary)
+                Text("Codex weekly limit %  ").font(.system(size: 11.5))
+                + Text("(7d)").font(.system(size: 9.5)).foregroundColor(.secondary)
             }
             Toggle(isOn: menuBarBinding("tokens")) {
                 Text("Daily token count").font(.system(size: 11.5))
@@ -1110,7 +1123,7 @@ struct MenuView: View {
         VStack(alignment: .leading, spacing: 5) {
             Toggle("Claude limit thresholds — session 25/50/75/90%, weekly 50/75/90%",
                    isOn: Binding(get: { limits.notificationsEnabled }, set: { limits.setNotifications($0) }))
-            Toggle("Codex limit thresholds — primary 25/50/75/90%, secondary 50/75/90%",
+            Toggle("Codex limit thresholds — session 25/50/75/90%, weekly 50/75/90%",
                    isOn: Binding(get: { openAILimits.notificationsEnabled }, set: { openAILimits.setNotifications($0) }))
             Toggle("Anthropic service status changes",
                    isOn: Binding(get: { status.notificationsEnabled }, set: { status.setNotifications($0) }))

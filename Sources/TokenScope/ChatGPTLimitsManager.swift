@@ -27,7 +27,7 @@ final class ChatGPTLimitsManager: ObservableObject {
     }
 
     func start() {
-        timer = Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { [weak self] _ in
+        timer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
             self?.refresh()
         }
         refresh()
@@ -129,18 +129,43 @@ final class ChatGPTLimitsManager: ObservableObject {
     // Current macOS Safari (the browser the cookie is expected to come from).
     private static let userAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.5 Safari/605.1.15"
 
-    /// The private response has changed across ChatGPT releases. Parse the
-    /// stable concepts rather than pinning the app to one exact nesting shape:
-    /// percent plus an optional duration and reset time.
+    // Same window ids/labels/accessors as the local OpenAILimitsManager so the
+    // header card and menu-bar gauges read either source uniformly.
+    private func percent(_ id: String) -> Int? {
+        windows.first(where: { $0.id == id }).map { Int($0.utilization.rounded()) }
+    }
+    var primaryPercent: Int? { percent("codex-primary") }
+    var secondaryPercent: Int? { percent("codex-secondary") }
+    private func period(_ id: String) -> String? { windows.first(where: { $0.id == id })?.period }
+    var primaryDuration: String? { period("codex-primary") }
+    var secondaryDuration: String? { period("codex-secondary") }
+
+    private struct RawWindow { let percent: Double; let minutes: Int?; let reset: Date? }
+
+    /// The private response has changed across ChatGPT releases, so walk it for the
+    /// stable concept (percent + optional window duration + reset) rather than a
+    /// fixed shape, then present the two windows as Session (shorter rolling window)
+    /// and Weekly (longer), mirroring Claude.
     private func parse(_ data: Data) {
         guard let root = try? JSONSerialization.jsonObject(with: data) else {
             errorMessage = "Couldn't parse ChatGPT usage response"
             return
         }
-        var found: [LimitWindow] = []
-        collectWindows(root, path: [], into: &found)
+        var raws: [RawWindow] = []
+        collectRaw(root, into: &raws)
         var seen = Set<String>()
-        windows = found.filter { seen.insert($0.id).inserted }
+        let distinct = raws.filter { seen.insert("\($0.minutes ?? -1):\($0.percent)").inserted }
+        let sorted = distinct.sorted { ($0.minutes ?? Int.max) < ($1.minutes ?? Int.max) }
+        windows = sorted.prefix(2).enumerated().map { index, r in
+            let session = index == 0
+            let period = r.minutes.map { Self.duration($0) } ?? "limit"
+            return LimitWindow(
+                id: session ? "codex-primary" : "codex-secondary",
+                label: "\(session ? "Session" : "Weekly") · \(period)",
+                utilization: r.percent,
+                resetsAt: r.reset,
+                period: period)
+        }
         lastUpdated = Date()
         errorMessage = windows.isEmpty
             ? "No recognized limits returned — ChatGPT's web response may have changed"
@@ -148,31 +173,19 @@ final class ChatGPTLimitsManager: ObservableObject {
         FileLog.log("chatgpt limits: \(windows.map { "\($0.id)=\(Int($0.utilization))%" }.joined(separator: " "))")
     }
 
-    private func collectWindows(_ value: Any, path: [String], into output: inout [LimitWindow]) {
+    private func collectRaw(_ value: Any, into output: inout [RawWindow]) {
         if let dict = value as? [String: Any] {
-            let percent = number(dict["used_percent"]) ?? number(dict["utilization"])
-            if let percent, percent >= 0, percent <= 100 {
+            if let percent = number(dict["used_percent"]) ?? number(dict["utilization"]),
+               percent >= 0, percent <= 100 {
                 let seconds = number(dict["window_seconds"]) ?? number(dict["window_duration_seconds"])
                     ?? number(dict["limit_window_seconds"])
                 let minutes = number(dict["window_minutes"]) ?? seconds.map { $0 / 60 }
-                let reset = date(dict["resets_at"]) ?? date(dict["reset_at"])
-                    ?? date(dict["reset_time"])
-                let rawName = (dict["name"] as? String) ?? (dict["label"] as? String)
-                    ?? path.last ?? "limit"
-                let normalized = rawName.replacingOccurrences(of: "_", with: " ")
-                let key = path.joined(separator: ".")
-                let duration = minutes.map { Self.duration(Int($0)) }
-                output.append(LimitWindow(
-                    id: "chatgpt-\(key.isEmpty ? normalized : key)",
-                    label: "ChatGPT · \(normalized)\(duration.map { " · \($0)" } ?? "")",
-                    utilization: percent,
-                    resetsAt: reset))
+                let reset = date(dict["resets_at"]) ?? date(dict["reset_at"]) ?? date(dict["reset_time"])
+                output.append(RawWindow(percent: percent, minutes: minutes.map { Int($0) }, reset: reset))
             }
-            for (key, child) in dict { collectWindows(child, path: path + [key], into: &output) }
+            for (_, child) in dict { collectRaw(child, into: &output) }
         } else if let array = value as? [Any] {
-            for (index, child) in array.enumerated() {
-                collectWindows(child, path: path + ["\(index)"], into: &output)
-            }
+            for child in array { collectRaw(child, into: &output) }
         }
     }
 

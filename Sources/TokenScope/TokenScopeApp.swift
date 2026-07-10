@@ -92,11 +92,19 @@ struct TokenScopeApp: App {
         if items.contains("weekly"), let p = limits.weeklyPercent {
             gauges.append(.init(origin: .claudeCode, period: "7d", pct: p))
         }
-        if items.contains("chatgptPrimary"), let p = openAILimits.primaryPercent {
-            gauges.append(.init(origin: .codex, period: openAILimits.primaryDuration ?? "", pct: p))
+        // Codex gauges read whichever source is active (auto-prefer cookie when
+        // connected, unless the user explicitly chose local).
+        let codexSrc = UserDefaults.standard.string(forKey: "CodexSource") ?? ""
+        let codexCookie = codexSrc == "cookie" || (codexSrc != "local" && chatGPTLimits.connected)
+        if items.contains("chatgptPrimary"),
+           let p = codexCookie ? chatGPTLimits.primaryPercent : openAILimits.primaryPercent {
+            let dur = (codexCookie ? chatGPTLimits.primaryDuration : openAILimits.primaryDuration) ?? ""
+            gauges.append(.init(origin: .codex, period: dur, pct: p))
         }
-        if items.contains("chatgptSecondary"), let p = openAILimits.secondaryPercent {
-            gauges.append(.init(origin: .codex, period: openAILimits.secondaryDuration ?? "", pct: p))
+        if items.contains("chatgptSecondary"),
+           let p = codexCookie ? chatGPTLimits.secondaryPercent : openAILimits.secondaryPercent {
+            let dur = (codexCookie ? chatGPTLimits.secondaryDuration : openAILimits.secondaryDuration) ?? ""
+            gauges.append(.init(origin: .codex, period: dur, pct: p))
         }
         let wantTokens = items.contains("tokens") || gauges.isEmpty
         return MenuBarRender.image(
