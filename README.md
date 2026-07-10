@@ -23,29 +23,33 @@ Token usage comes from two independent sources, reconciled automatically:
    daily history once, matching Claude Code's heatmap retention. This covers local
    Codex app/CLI sessions without a Cookie.
 
-3. **Local Ollama proxy** (`127.0.0.1:11435 → 127.0.0.1:11434`). A transparent TCP
-   relay that parses token counts out of responses as they stream — Ollama-native,
-   OpenAI-format, and Anthropic-format alike. This is what gives you the **live,
-   while-it's-generating** counter, and it captures Ollama clients that aren't
-   Claude Code (`ollama run`, scripts, other apps). When the same call is seen by
-   both sources (Claude Code routed through the proxy), the proxy copy is shadowed
-   so totals count it once.
+3. **Local Ollama gateway** (`127.0.0.1:11435 → 127.0.0.1:11434` by default). An
+   HTTP-aware relay that frames requests and responses before parsing exact token
+   counts from Ollama-native, OpenAI-compatible, and Anthropic-compatible streams.
+   Gateway calls are the canonical Ollama record; Claude and Codex transcripts
+   attach their session/project identity instead of adding a second counted call.
+
+4. **Ollama Desktop sessions** (`~/Library/Application Support/Ollama/db.sqlite`).
+   A version-checked, read-only watcher associates new Desktop chats with gateway
+   calls using an in-memory SHA-256 fingerprint. Prompt text is never persisted.
+   If the private schema changes or attribution is ambiguous, exact token
+   accounting continues and the call remains unassigned.
 
 Two more panels track things tokens alone don't tell you (features adapted from
 [ClaudeUsageBar](https://github.com/Artzainnn/ClaudeUsageBar)):
 
-4. **claude.ai plan limits** (optional). Paste your claude.ai Cookie header in Settings and
+5. **claude.ai plan limits** (optional). Paste your claude.ai Cookie header in Settings and
    the Now tab shows your 5-hour session and 7-day weekly utilization as
    color-coded bars with reset countdowns, and alerts you at 25/50/75/90%. This is
    the "how close am I to being throttled" view. Uses an unofficial claude.ai
    endpoint; the cookie is stored locally and sent only to claude.ai.
 
-5. **ChatGPT web limits** (experimental, optional). Paste a ChatGPT Cookie header
+6. **ChatGPT web limits** (experimental, optional). Paste a ChatGPT Cookie header
    and TokenScope queries ChatGPT's private usage surface for whatever limit windows
    it returns. This is intentionally limits-only: ChatGPT web conversations do not
    provide a reliable local per-chat token transcript. The endpoint may change.
 
-6. **Service status**. Polls the public Claude and OpenAI status pages so you can
+7. **Service status**. Polls the public Claude and OpenAI status pages so you can
    tell whether either provider is degraded — shown in the footer, with optional
    per-provider change alerts.
 
@@ -79,6 +83,35 @@ up via the transcripts, just not live during generation.)
 export OLLAMA_HOST=127.0.0.1:11435
 ollama run gemma4:12b-mlx
 ```
+
+**Codex → Ollama through TokenScope:** configure a named custom provider in
+`~/.codex/config.toml`:
+
+```toml
+model = "gpt-oss:20b"
+model_provider = "tokenscope_ollama"
+
+[model_providers.tokenscope_ollama]
+name = "TokenScope Ollama"
+base_url = "http://127.0.0.1:11435/v1"
+wire_api = "chat"
+```
+
+### Capture all local Ollama traffic, including Desktop
+
+The opt-in capture-all layout lets TokenScope own Ollama's standard port and
+moves the daemon behind it. Quit both apps before changing ports:
+
+```sh
+launchctl setenv OLLAMA_HOST "127.0.0.1:11435"
+defaults write com.baysora.tokenscope ProxyPort -int 11434
+defaults write com.baysora.tokenscope OllamaPort -int 11435
+```
+
+Start TokenScope first, then Ollama. Existing Desktop, CLI, Claude, and Codex
+clients can continue using `127.0.0.1:11434`. Settings includes a copyable setup
+and rollback recipe. This changes local routing only; it does not inspect remote
+or TLS traffic.
 
 **Native Claude Code:** nothing to do. Transcripts are watched automatically.
 

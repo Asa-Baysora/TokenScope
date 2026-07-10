@@ -67,6 +67,9 @@ final class Relay: Hashable {
     private let client: NWConnection
     private let upstream: NWConnection
     private let scanner: ResponseScanner
+    private let requestInspector: OllamaRequestInspector
+    private let requestRewriter = OllamaRequestHeaderRewriter()
+    private let responseDecoder: OllamaResponseBodyDecoder
     private let queue = DispatchQueue(label: "tokenscope.relay")
     private var closed = false
     var onClose: ((Relay) -> Void)?
@@ -77,9 +80,14 @@ final class Relay: Hashable {
             host: NWEndpoint.Host("127.0.0.1"),
             port: NWEndpoint.Port(rawValue: upstreamPort) ?? 11434,
             using: .tcp)
-        self.scanner = ResponseScanner(
+        let scanner = ResponseScanner(
             onUpdate: { [weak store] st in store?.upsertLiveCall(st) },
             onFinal: { [weak store] st in store?.finishLiveCall(st) })
+        self.scanner = scanner
+        self.requestInspector = OllamaRequestInspector { request in scanner.observeRequest(request) }
+        self.responseDecoder = OllamaResponseBodyDecoder(
+            onBody: { data in scanner.consume(data) },
+            onResponseEnd: { scanner.responseEnded() })
     }
 
     func start() {
@@ -99,8 +107,13 @@ final class Relay: Hashable {
         client.receive(minimumIncompleteLength: 1, maximumLength: 1 << 16) { [weak self] data, _, complete, error in
             guard let self, !self.closed else { return }
             if let data, !data.isEmpty {
-                let out = Self.forceIdentityEncoding(data)
-                self.upstream.send(content: out, completion: .contentProcessed { [weak self] err in
+                self.requestInspector.consume(data)
+                let rewritten = self.requestRewriter.consume(data)
+                guard !rewritten.isEmpty else {
+                    if complete { self.halfCloseUpstream() } else { self.pumpClientToUpstream() }
+                    return
+                }
+                self.upstream.send(content: rewritten, completion: .contentProcessed { [weak self] err in
                     guard let self, !self.closed else { return }
                     if err != nil {
                         self.close()
@@ -128,7 +141,7 @@ final class Relay: Hashable {
         upstream.receive(minimumIncompleteLength: 1, maximumLength: 1 << 16) { [weak self] data, _, complete, error in
             guard let self, !self.closed else { return }
             if let data, !data.isEmpty {
-                self.scanner.consume(data)
+                self.responseDecoder.consume(data)
                 self.client.send(content: data, completion: .contentProcessed { [weak self] err in
                     guard let self, !self.closed else { return }
                     if err != nil || complete {
@@ -148,22 +161,11 @@ final class Relay: Hashable {
     private func close() {
         if closed { return }
         closed = true
+        responseDecoder.connectionClosed()
         scanner.connectionClosed()
         client.cancel()
         upstream.cancel()
         onClose?(self)
-    }
-
-    /// Rewrites Accept-Encoding to identity inside request headers so the upstream
-    /// never gzips responses. Bodies are JSON and can't contain this header string,
-    /// so a plain text replace on the byte stream is safe.
-    private static func forceIdentityEncoding(_ data: Data) -> Data {
-        guard let s = String(data: data, encoding: .utf8), s.contains("Accept-Encoding") else { return data }
-        let replaced = s.replacingOccurrences(
-            of: "Accept-Encoding:[^\r\n]*",
-            with: "Accept-Encoding: identity",
-            options: [.regularExpression, .caseInsensitive])
-        return Data(replaced.utf8)
     }
 
     static func == (a: Relay, b: Relay) -> Bool { a === b }

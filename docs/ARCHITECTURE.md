@@ -13,10 +13,10 @@ No third-party dependencies.
    Claude Code ──┐                                          │ tail (1s poll)
    ollama run ───┤                                          ▼
    any client ───┴─► 127.0.0.1:11435 ─────────►  ┌──────────────────────┐
-                     OllamaProxy (TCP relay)     │      UsageStore      │ ──► MenuView
+                     HTTP-aware gateway          │      UsageStore      │ ──► MenuView
                        │            │            │  events (31 days)    │     (MenuBarExtra)
                        ▼            ▼            │  history (forever)   │
-                  127.0.0.1:11434  ResponseScanner ──► live + per-call  │
+                  127.0.0.1:11434  BodyDecoder + ResponseScanner       │
                      (Ollama)                    └──────────────────────┘
 ```
 
@@ -54,12 +54,13 @@ into the shared history, matching Claude's launch behavior. `rate_limits.primary
 and `secondary` feed the observed Codex quota card. No prompt, reply, or tool
 payload is stored by TokenScope.
 
-**3. Local proxy** (`OllamaProxy` → `Relay` → `ResponseScanner`). A transparent
-TCP relay `127.0.0.1:11435 → 127.0.0.1:11434`. Bytes pass through unmodified
-except request `Accept-Encoding` headers are forced to `identity`. The response
-direction is tapped by a per-connection `ResponseScanner` that splits on
-newlines (NDJSON and SSE are newline-framed; chunked-transfer size markers
-appear as bare hex lines and are filtered) and understands three shapes:
+**3. Local gateway** (`OllamaProxy` → `OllamaHTTP` → `ResponseScanner`). The
+default route is `127.0.0.1:11435 → 127.0.0.1:11434`. Complete HTTP headers are
+framed before `Accept-Encoding` is safely set to `identity`; request bodies pass
+through unchanged. Response headers, Content-Length bodies, and chunked transfer
+framing are decoded before NDJSON/SSE reaches `ResponseScanner`. Request metadata
+supplies the model, endpoint, a stable per-call UUID, and a temporary last-user
+message fingerprint.
 
 | Format | Detect | Input | Output | End of call |
 |---|---|---|---|---|
@@ -75,10 +76,16 @@ usage-bearing line falls back to regex extraction. Calls with zero output
 This is the only source that sees tokens **while they stream**, and the only
 one that sees non-Claude-Code Ollama clients (`OLLAMA_HOST=127.0.0.1:11435`).
 
-**4. `/api/ps` poller** (`OllamaStatusPoller`): every 10s, which model(s) are
+**4. Ollama Desktop session adapter** (`OllamaDesktopSessionWatcher`): opens the
+Desktop SQLite store read-only, validates required tables/columns, and observes
+new user-message metadata. It hashes content in memory and passes only the hash,
+chat id, title, model, and timestamp to `UsageStore`. A unique match attaches the
+Desktop chat; ambiguous matches remain unassigned.
+
+**5. `/api/ps` poller** (`OllamaStatusPoller`): every 10s, which model(s) are
 resident in Ollama's memory + VRAM, for the "Now" zone.
 
-**5. claude.ai plan limits** (`LimitsManager`): polls `claude.ai/api/organizations/{orgId}/usage`
+**6. claude.ai plan limits** (`LimitsManager`): polls `claude.ai/api/organizations/{orgId}/usage`
 every 5 min using the user's claude.ai Cookie header (pasted in Settings, stored
 in app preferences). Parses `five_hour` / `seven_day` / `seven_day_sonnet`
 `utilization` (%) + `resets_at`. Org ID comes from the `lastActiveOrg` cookie
@@ -88,12 +95,12 @@ Unofficial endpoint — degrades gracefully (no cookie → connect prompt;
 weekly 50/75/90%) via `ThresholdTracker`, which fires each band once per climb
 and re-arms on drop. Adapted from github.com/Artzainnn/ClaudeUsageBar.
 
-**6. ChatGPT web limits** (`ChatGPTLimitsManager`): an opt-in, private endpoint
+**7. ChatGPT web limits** (`ChatGPTLimitsManager`): an opt-in, private endpoint
 adapter using a pasted ChatGPT Cookie header. It recognizes returned percentage,
 duration, and reset concepts without fabricating token totals. It is isolated from
 local telemetry because the web response can change independently.
 
-**7. Service status** (`StatusManager`): polls both public Statuspage summaries —
+**8. Service status** (`StatusManager`): polls both public Statuspage summaries —
 `status.claude.com/api/v2/summary.json` and `status.openai.com/api/v2/summary.json`
 (no auth) every 5 min for overall indicators, non-operational components, and
 active incidents; each provider has its own notification preference and status-page
@@ -115,12 +122,11 @@ identifier so the bare `--snapshot` binary doesn't raise an NSException).
   what lets the 6-month heatmap accumulate. A backfill scan covers the gap
   `(completeThrough, cutoff)` from whatever old transcripts still exist (≤366d),
   exactly once per gap.
-- **Double-count prevention.** A Claude Code call through the proxy is observed
-  twice. Runtime: when a transcript event arrives, a recent proxy event with
-  matching output tokens (±2, ±90s) is marked `shadowed` (and vice versa).
-  Startup: `replayFinished` sorts events and re-reconciles persisted proxy
-  events against replayed transcripts (±2 tokens, ±120s). Shadowed events are
-  excluded from every aggregate but kept for the call log.
+- **Double-count prevention.** A routed Claude or Codex call is observed at the
+  gateway and in its transcript. The gateway observation remains the canonical
+  Ollama event; the transcript is shadowed and contributes its authoritative
+  session/project ownership. Attribution rewrites the small persisted gateway
+  window so linked sessions survive restarts.
 - **Dedup**: Claude Code transcript events dedup on `message.id:requestId` (first
   wins); Codex events dedup by source-file byte offset; streaming rewrites repeat
   messages across lines.

@@ -7,7 +7,8 @@ let package = Package(
     targets: [
         .executableTarget(
             name: "TokenScope",
-            path: "Sources/TokenScope"
+            path: "Sources/TokenScope",
+            linkerSettings: [.linkedLibrary("sqlite3")]
         )
     ]
 )

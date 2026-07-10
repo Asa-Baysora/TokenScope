@@ -9,7 +9,9 @@ import Foundation
 /// size markers appear as bare hex lines and are filtered out.
 final class ResponseScanner {
     struct CallState {
-        let id = UUID()
+        let id: UUID
+        var requestPath: String?
+        var promptFingerprint: String?
         var model = "ollama"
         var input = 0
         var output = 0
@@ -24,6 +26,7 @@ final class ResponseScanner {
 
     private var carry = Data()
     private var state: CallState?
+    private var requests: [OllamaRequestMetadata] = []
     private var lastEmit = Date.distantPast
     private let onUpdate: (CallState) -> Void
     private let onFinal: (CallState) -> Void
@@ -31,6 +34,11 @@ final class ResponseScanner {
     init(onUpdate: @escaping (CallState) -> Void, onFinal: @escaping (CallState) -> Void) {
         self.onUpdate = onUpdate
         self.onFinal = onFinal
+    }
+
+    func observeRequest(_ request: OllamaRequestMetadata) {
+        guard request.isInference else { return }
+        requests.append(request)
     }
 
     func consume(_ data: Data) {
@@ -54,6 +62,10 @@ final class ResponseScanner {
     }
 
     func connectionClosed() {
+        responseEnded()
+    }
+
+    func responseEnded() {
         if !carry.isEmpty {
             processLine(carry)
             carry = Data()
@@ -85,7 +97,14 @@ final class ResponseScanner {
     }
 
     private func ensure() {
-        if state == nil { state = CallState() }
+        if state == nil {
+            let request = requests.isEmpty ? nil : requests.removeFirst()
+            state = CallState(
+                id: UUID(),
+                requestPath: request?.path,
+                promptFingerprint: request?.promptFingerprint,
+                model: request?.model ?? "ollama")
+        }
     }
 
     private func handle(_ obj: [String: Any]) {

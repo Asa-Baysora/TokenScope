@@ -29,14 +29,39 @@ enum EventSource: String {
     case proxy      // observed by the local Ollama proxy
 }
 
+/// The user-facing client that owns a local inference call. `provider` answers
+/// who ran the model; `surface` answers where the conversation lives.
+enum UsageSurface: String, Codable, CaseIterable {
+    case claudeCode
+    case codex
+    case ollamaDesktop
+    case ollamaDirect
+
+    var displayName: String {
+        switch self {
+        case .claudeCode: return "Claude Code · Ollama"
+        case .codex: return "Codex · Ollama"
+        case .ollamaDesktop: return "Ollama Desktop"
+        case .ollamaDirect: return "Ollama Direct"
+        }
+    }
+}
+
+enum AttributionConfidence: String, Codable {
+    case authoritative
+    case linked
+    case inferred
+    case unassigned
+}
+
 struct UsageEvent: Identifiable {
     let id = UUID()
     let timestamp: Date
     let provider: UsageOrigin
     let source: EventSource
     let model: String
-    let sessionId: String?
-    let projectName: String?
+    var sessionId: String?
+    var projectName: String?
     let inputTokens: Int
     let outputTokens: Int
     let cacheReadTokens: Int
@@ -44,6 +69,11 @@ struct UsageEvent: Identifiable {
     /// A subset of Codex's output tokens. Retained for detail, never added to
     /// the headline total a second time.
     let reasoningTokens: Int
+    /// Stable for a gateway-observed call. Transcript-only events do not have
+    /// one because their durable source identity is their transcript dedup key.
+    var callId: UUID? = nil
+    var surface: UsageSurface? = nil
+    var attributionConfidence: AttributionConfidence = .authoritative
     // A proxy observation that was also recorded by a Claude Code transcript;
     // kept for the call log but excluded from totals.
     var shadowed = false
@@ -81,6 +111,8 @@ struct SessionAgg: Identifiable {
     let title: String
     let project: String?
     let provider: UsageOrigin
+    var surface: UsageSurface?
+    var confidence: AttributionConfidence
     var totals = Totals()
     var lastActivity = Date.distantPast
     var models: Set<String> = []

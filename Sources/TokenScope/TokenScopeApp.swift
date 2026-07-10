@@ -9,6 +9,7 @@ final class AppServices {
     let codexWatcher: CodexTranscriptWatcher
     let proxy: OllamaProxy
     let ollamaStatus: OllamaStatusPoller
+    let ollamaDesktop: OllamaDesktopSessionWatcher
     let limits: LimitsManager
     let openAILimits: OpenAILimitsManager
     let chatGPTLimits: ChatGPTLimitsManager
@@ -25,6 +26,7 @@ final class AppServices {
         codexWatcher = CodexTranscriptWatcher(store: s, limits: openAILimits)
         proxy = OllamaProxy(store: s)
         ollamaStatus = OllamaStatusPoller(store: s)
+        ollamaDesktop = OllamaDesktopSessionWatcher(store: s)
         limits = LimitsManager()
         chatGPTLimits = ChatGPTLimitsManager()
         status = StatusManager()
@@ -35,6 +37,7 @@ final class AppServices {
         codexWatcher.start()
         proxy.start()
         ollamaStatus.start()
+        ollamaDesktop.start()
         limits.start()
         chatGPTLimits.start()
         status.start()
@@ -112,6 +115,8 @@ enum Main {
         let args = CommandLine.arguments
         if let i = args.firstIndex(of: "--snapshot"), args.indices.contains(i + 1) {
             MainActor.assumeIsolated { Snapshot.run(path: args[i + 1]) }
+        } else if args.contains("--verify-ollama-http") {
+            exit(OllamaHTTPVerifier.run() ? 0 : 1)
         } else if let i = args.firstIndex(of: "--gauges"), args.indices.contains(i + 1) {
             dumpGauges(dir: args[i + 1])
         } else if let i = args.firstIndex(of: "--menubar"), args.indices.contains(i + 1) {

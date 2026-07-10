@@ -22,7 +22,16 @@ final class UsageStore: ObservableObject {
     let proxyPort: UInt16
     let upstreamPort: UInt16
 
+    var captureAllConfigured: Bool { proxyPort == 11434 && upstreamPort != 11434 }
+    var ollamaDesktopStoreAvailable: Bool {
+        FileManager.default.fileExists(atPath: FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/Ollama/db.sqlite").path)
+    }
+
     private var seenKeys = Set<String>()
+    /// Privacy-preserving, in-memory correlation only. Prompt fingerprints are
+    /// never written to disk or exposed through the UI.
+    private var proxyFingerprints: [UUID: String] = [:]
     private var timer: Timer?
     private let ioQueue = DispatchQueue(label: "tokenscope.store-io", qos: .utility)
 
@@ -61,6 +70,10 @@ final class UsageStore: ObservableObject {
         let output: Int
         let cacheR: Int
         let cacheC: Int
+        var sessionId: String? = nil
+        var projectName: String? = nil
+        var surface: UsageSurface? = nil
+        var confidence: AttributionConfidence? = nil
     }
 
     init() {
@@ -96,20 +109,20 @@ final class UsageStore: ObservableObject {
         DispatchQueue.main.async {
             guard !self.seenKeys.contains(dedupKey) else { return }
             self.seenKeys.insert(dedupKey)
-            // If the proxy already observed this same call (Claude Code routed through it),
-            // shadow the proxy copy so totals count it once.
-            if e.provider == .ollama {
-                for i in self.events.indices.reversed().prefix(60) {
-                    let p = self.events[i]
-                    if p.source == .proxy, !p.shadowed,
-                       abs(p.timestamp.timeIntervalSince(e.timestamp)) < 90,
-                       abs(p.outputTokens - e.outputTokens) <= 2 {
-                        self.events[i].shadowed = true
-                        break
-                    }
-                }
+            var transcript = e
+            // A routed local call is observed at two layers. Keep the gateway
+            // record as the canonical exact Ollama usage, and attach the owning
+            // Claude/Codex session from its transcript. This covers Codex too;
+            // the previous implementation reconciled Claude only.
+            if let i = self.proxyMatch(for: e) {
+                self.events[i].sessionId = e.sessionId
+                self.events[i].projectName = e.projectName
+                self.events[i].surface = e.source == .codexTranscript ? .codex : .claudeCode
+                self.events[i].attributionConfidence = .linked
+                transcript.shadowed = true
+                self.rewritePersistedProxyEvents()
             }
-            self.appendEvent(e)
+            self.appendEvent(transcript)
             self.trim()
             // Intentionally not logged per-event: at thousands of events/replay this
             // dominated both the log size and the write overhead. Lifecycle summaries
@@ -151,18 +164,88 @@ final class UsageStore: ObservableObject {
                 cacheReadTokens: st.cacheRead,
                 cacheCreationTokens: st.cacheCreate,
                 reasoningTokens: 0)
-            // Reverse of the shadowing above, in case the transcript line landed first.
-            for t in self.events.suffix(60)
-            where t.source == .transcript && t.provider == .ollama && !t.shadowed {
-                if abs(t.timestamp.timeIntervalSinceNow) < 90, abs(t.outputTokens - e.outputTokens) <= 2 {
-                    e.shadowed = true
-                    break
-                }
+            e.callId = st.id
+            e.surface = .ollamaDirect
+            e.attributionConfidence = .unassigned
+            // Reverse ordering: a transcript can land just before the final
+            // gateway chunk. Shadow that transcript and inherit its ownership.
+            if let i = self.transcriptMatch(for: e) {
+                self.events[i].shadowed = true
+                e.sessionId = self.events[i].sessionId
+                e.projectName = self.events[i].projectName
+                e.surface = self.events[i].source == .codexTranscript ? .codex : .claudeCode
+                e.attributionConfidence = .linked
             }
             self.appendEvent(e)
+            if let fingerprint = st.promptFingerprint { self.proxyFingerprints[e.id] = fingerprint }
+            let fingerprintCutoff = Date().addingTimeInterval(-10 * 60)
+            let recentIds = Set(self.events.lazy.filter { $0.timestamp >= fingerprintCutoff }.map(\.id))
+            self.proxyFingerprints = self.proxyFingerprints.filter { recentIds.contains($0.key) }
             self.trim()
             self.persistProxyEvent(e)
             FileLog.log("proxy \(e.model) in=\(e.inputTokens) out=\(e.outputTokens) shadowed=\(e.shadowed)")
+        }
+    }
+
+    private func proxyMatch(for transcript: UsageEvent) -> Int? {
+        rankedMatch(in: events.indices.reversed().prefix(80), reference: transcript) { i in
+            let candidate = events[i]
+            return candidate.source == .proxy && !candidate.shadowed &&
+                (candidate.sessionId == "ollama-direct" || candidate.sessionId == transcript.sessionId) &&
+                (candidate.model == "ollama" || transcript.model == candidate.model)
+        }
+    }
+
+    private func transcriptMatch(for proxy: UsageEvent) -> Int? {
+        rankedMatch(in: events.indices.reversed().prefix(80), reference: proxy) { i in
+            let candidate = events[i]
+            return candidate.source != .proxy && !candidate.shadowed &&
+                (proxy.model == "ollama" || candidate.model == proxy.model)
+        }
+    }
+
+    /// Returns a match only when one candidate is materially better than the
+    /// next. Equal-size short replies are common, so ambiguity must leave calls
+    /// unassigned instead of silently linking the wrong conversation.
+    private func rankedMatch<S: Sequence>(
+        in indices: S, reference: UsageEvent, eligible: (Int) -> Bool
+    ) -> Int? where S.Element == Int {
+        var ranked: [(index: Int, score: Double)] = []
+        for i in indices where eligible(i) {
+            let candidate = events[i]
+            let seconds = abs(candidate.timestamp.timeIntervalSince(reference.timestamp))
+            let outputDelta = abs(candidate.outputTokens - reference.outputTokens)
+            guard seconds < 90, outputDelta <= 2 else { continue }
+            let inputDelta = abs(candidate.inputTokens - reference.inputTokens)
+            let score = seconds + Double(outputDelta * 30) + min(Double(inputDelta) * 0.01, 20)
+            ranked.append((i, score))
+        }
+        ranked.sort { $0.score < $1.score }
+        guard let best = ranked.first else { return nil }
+        if ranked.count > 1, ranked[1].score - best.score < 5 { return nil }
+        return best.index
+    }
+
+    /// Called by the Desktop adapter after observing a user message in Ollama's
+    /// local chat database. The prompt itself never crosses this boundary.
+    func registerDesktopMessage(
+        fingerprint: String, chatId: String, title: String, model: String?, timestamp: Date
+    ) {
+        DispatchQueue.main.async {
+            self.setSessionName(chatId, title)
+            let candidates = self.events.indices.filter { i in
+                let event = self.events[i]
+                guard event.source == .proxy, event.sessionId == "ollama-direct",
+                      let stored = self.proxyFingerprints[event.id], stored == fingerprint else { return false }
+                return abs(event.timestamp.timeIntervalSince(timestamp)) < 180 &&
+                    (model == nil || event.model == "ollama" || event.model == model)
+            }
+            guard candidates.count == 1, let i = candidates.first else { return }
+            self.events[i].sessionId = chatId
+            self.events[i].surface = .ollamaDesktop
+            self.events[i].attributionConfidence = .linked
+            self.proxyFingerprints.removeValue(forKey: self.events[i].id)
+            self.rewritePersistedProxyEvents()
         }
     }
 
@@ -214,25 +297,10 @@ final class UsageStore: ObservableObject {
     func replayFinished(coverThrough: Date) {
         DispatchQueue.main.async {
             self.events.sort { $0.timestamp < $1.timestamp }
-            var byOut: [Int: [Date]] = [:]
-            for e in self.events where e.source == .transcript && e.provider == .ollama {
-                byOut[e.outputTokens, default: []].append(e.timestamp)
-            }
-            var shadowed = 0
-            for i in self.events.indices where self.events[i].source == .proxy && !self.events[i].shadowed {
-                let e = self.events[i]
-                search: for delta in -2...2 {
-                    if let dates = byOut[e.outputTokens + delta],
-                       dates.contains(where: { abs($0.timeIntervalSince(e.timestamp)) < 120 }) {
-                        self.events[i].shadowed = true
-                        shadowed += 1
-                        break search
-                    }
-                }
-            }
             self.historyCompleteThrough = max(self.historyCompleteThrough, coverThrough)
             self.saveHistory()
-            FileLog.log("replay complete: \(self.events.count) events in window, \(shadowed) proxy events shadowed, history through \(Self.dayKey(self.historyCompleteThrough))")
+            let linked = self.events.filter { $0.source == .proxy && $0.attributionConfidence == .linked }.count
+            FileLog.log("replay complete: \(self.events.count) events in window, \(linked) gateway calls linked, history through \(Self.dayKey(self.historyCompleteThrough))")
         }
     }
 
@@ -332,13 +400,15 @@ final class UsageStore: ObservableObject {
                 provider: .ollama,
                 source: .proxy,
                 model: pe.model,
-                sessionId: "ollama-direct",
-                projectName: nil,
+                sessionId: pe.sessionId ?? "ollama-direct",
+                projectName: pe.projectName,
                 inputTokens: pe.input,
                 outputTokens: pe.output,
                 cacheReadTokens: pe.cacheR,
                 cacheCreationTokens: pe.cacheC,
-                reasoningTokens: 0))
+                reasoningTokens: 0,
+                surface: pe.surface ?? .ollamaDirect,
+                attributionConfidence: pe.confidence ?? .unassigned))
         }
         events = loaded.sorted { $0.timestamp < $1.timestamp }
         ioQueue.async {
@@ -355,7 +425,11 @@ final class UsageStore: ObservableObject {
             input: e.inputTokens,
             output: e.outputTokens,
             cacheR: e.cacheReadTokens,
-            cacheC: e.cacheCreationTokens)
+            cacheC: e.cacheCreationTokens,
+            sessionId: e.sessionId,
+            projectName: e.projectName,
+            surface: e.surface,
+            confidence: e.attributionConfidence)
         guard var line = try? JSONEncoder().encode(pe) else { return }
         line.append(0x0A)
         ioQueue.async {
@@ -367,6 +441,31 @@ final class UsageStore: ObservableObject {
             } else {
                 try? line.write(to: Self.proxyEventsURL)
             }
+        }
+    }
+
+    private func rewritePersistedProxyEvents() {
+        var data = Data()
+        let encoder = JSONEncoder()
+        for e in events where e.source == .proxy {
+            let pe = PersistedProxyEvent(
+                ts: e.timestamp.timeIntervalSince1970,
+                model: e.model,
+                input: e.inputTokens,
+                output: e.outputTokens,
+                cacheR: e.cacheReadTokens,
+                cacheC: e.cacheCreationTokens,
+                sessionId: e.sessionId,
+                projectName: e.projectName,
+                surface: e.surface,
+                confidence: e.attributionConfidence)
+            guard var line = try? encoder.encode(pe) else { continue }
+            line.append(0x0A)
+            data.append(line)
+        }
+        ioQueue.async {
+            try? FileManager.default.createDirectory(at: Self.supportDir, withIntermediateDirectories: true)
+            try? data.write(to: Self.proxyEventsURL, options: .atomic)
         }
     }
 
@@ -406,11 +505,17 @@ final class UsageStore: ObservableObject {
             var agg = by[key] ?? SessionAgg(
                 id: key,
                 title: sessionTitle(for: key, sample: e),
-                project: e.source == .proxy ? nil : e.projectName,
-                provider: e.provider)
+                project: e.projectName,
+                provider: e.provider,
+                surface: e.surface,
+                confidence: e.attributionConfidence)
             agg.totals.add(e)
             agg.lastActivity = max(agg.lastActivity, e.timestamp)
             agg.models.insert(e.model)
+            if agg.surface == nil { agg.surface = e.surface }
+            if e.attributionConfidence == .authoritative || e.attributionConfidence == .linked {
+                agg.confidence = e.attributionConfidence
+            }
             by[key] = agg
         }
         return by.values.sorted { $0.lastActivity > $1.lastActivity }
@@ -504,8 +609,8 @@ final class UsageStore: ObservableObject {
     }
 
     private func sessionTitle(for key: String, sample e: UsageEvent) -> String {
-        if e.source == .proxy { return "Ollama (direct)" }
         if let name = sessionNames[key] { return name }
+        if e.source == .proxy { return e.surface?.displayName ?? "Ollama Direct" }
         if e.provider == .codex {
             return e.projectName.map { "Codex · \($0)" } ?? "Codex session \(String(key.prefix(8)))"
         }
