@@ -129,8 +129,8 @@ Proxy events persist in `~/Library/Application Support/TokenScope/proxy-events.j
 Defaults: listen 11435, upstream 11434. Override with:
 
 ```sh
-defaults write com.baysora.tokenscope ProxyPort -int 11435
-defaults write com.baysora.tokenscope OllamaPort -int 11434
+defaults write com.tokenscope ProxyPort -int 11435
+defaults write com.tokenscope OllamaPort -int 11434
 ```
 
 Events are also appended to `~/Library/Logs/TokenScope.log` for debugging.

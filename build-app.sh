@@ -28,7 +28,7 @@ cat > "$APP/Contents/Info.plist" <<'EOF'
     <key>CFBundleDisplayName</key>
     <string>TokenScope</string>
     <key>CFBundleIdentifier</key>
-    <string>com.baysora.tokenscope</string>
+    <string>com.tokenscope</string>
     <key>CFBundleExecutable</key>
     <string>TokenScope</string>
     <key>CFBundlePackageType</key>

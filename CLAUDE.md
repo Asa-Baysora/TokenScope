@@ -139,5 +139,5 @@ Idle CPU must stay near zero. Measured regressions that were fixed; don't undo:
   own persisted watermark drives the one-time ≤366-day history backfill.
 - `~/Library/Logs/TokenScope.log` — every ingested event and lifecycle step;
   first place to look when verifying behavior.
-- Ports via `defaults write com.baysora.tokenscope ProxyPort|OllamaPort -int N`
+- Ports via `defaults write com.tokenscope ProxyPort|OllamaPort -int N`
   (defaults 11435 → 11434).
