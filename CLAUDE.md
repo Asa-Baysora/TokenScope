@@ -2,8 +2,10 @@
 
 TokenScope is a macOS menu bar app (SwiftPM, SwiftUI `MenuBarExtra`) that meters
 local LLM token usage — live, per call, per session, per day — for Claude Code
-(native Anthropic or pointed at Ollama), Codex local sessions, and any Ollama
-client routed through its local proxy. It also tracks claude.ai plan limits,
+(native Anthropic or pointed at Ollama), Codex local sessions, any Ollama client
+routed through its local proxy, and LM Studio (via `lms log stream --source
+model`, which captures the app's own chats, the `lms` CLI, and `:1234` clients —
+counts only, never prompt/reply text). It also tracks claude.ai plan limits,
 observed Codex quota windows, experimental ChatGPT web limits, and Claude/OpenAI
 service status. See
 `docs/ARCHITECTURE.md` for the full design.
