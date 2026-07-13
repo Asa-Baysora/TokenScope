@@ -112,7 +112,7 @@ struct MenuView: View {
     }
 
     enum SessionOriginFilter: String, CaseIterable, Identifiable {
-        case all, claudeCode, codex, ollama
+        case all, claudeCode, codex, ollama, lmStudio
 
         var id: String { rawValue }
         var origin: UsageOrigin? { UsageOrigin(rawValue: rawValue) }
@@ -122,6 +122,7 @@ struct MenuView: View {
             case .claudeCode: return "Claude"
             case .codex: return "Codex"
             case .ollama: return "Ollama"
+            case .lmStudio: return "LM Studio"
             }
         }
     }
@@ -501,7 +502,7 @@ struct MenuView: View {
                 .controlSize(.small)
                 Spacer()
             }
-            Text("Local tokens observed on this Mac: Claude, Codex, and Ollama (excludes web/desktop ChatGPT and claude.ai).")
+            Text("Local tokens observed on this Mac: Claude, Codex, Ollama, and LM Studio (excludes web/desktop ChatGPT and claude.ai).")
                 .font(.system(size: 9.5)).foregroundStyle(.tertiary)
                 .fixedSize(horizontal: false, vertical: true)
             section(.chart) { chartBlock }
@@ -510,6 +511,7 @@ struct MenuView: View {
                     providerBlock(.claudeCode)
                     providerBlock(.codex)
                     providerBlock(.ollama)
+                    providerBlock(.lmStudio)
                 }
             }
             section(.sessions) { sessionsContent }
@@ -526,7 +528,7 @@ struct MenuView: View {
             : allBars
         let grouped = barStyleRaw == "grouped"
         let maxV = grouped
-            ? max(bars.map { max($0.claude, $0.codex, $0.ollama) }.max() ?? 0, 1)
+            ? max(bars.map { max(max($0.claude, $0.codex), max($0.ollama, $0.lmStudio)) }.max() ?? 0, 1)
             : max(bars.map(\.total).max() ?? 0, 1)
         let maxTotal = max(bars.map(\.total).max() ?? 0, 1)
         let barHeight: CGFloat = 42
@@ -590,7 +592,7 @@ struct MenuView: View {
     private func chartHelp(_ d: DayStat) -> String {
         let label = period == .today ? Self.hourFmt.string(from: d.day) : Self.dayFmt.string(from: d.day)
         let suffix = chartIncludeCache ? " (incl. cache)" : ""
-        return "\(label): Claude \(Fmt.compact(d.claude)) · Codex \(Fmt.compact(d.codex)) · Ollama \(Fmt.compact(d.ollama))\(suffix)"
+        return "\(label): Claude \(Fmt.compact(d.claude)) · Codex \(Fmt.compact(d.codex)) · Ollama \(Fmt.compact(d.ollama)) · LM Studio \(Fmt.compact(d.lmStudio))\(suffix)"
     }
 
     private func leadingEdgeLabel(_ bars: [DayStat]) -> String {
@@ -605,6 +607,10 @@ struct MenuView: View {
 
     private func stackedBar(_ d: DayStat, maxV: Int, height: CGFloat) -> some View {
         VStack(spacing: 1) {
+            if d.lmStudio > 0 {
+                RoundedRectangle(cornerRadius: 1).fill(barColor(.lmStudio))
+                    .frame(height: max(height * CGFloat(d.lmStudio) / CGFloat(maxV), 1.5))
+            }
             if d.ollama > 0 {
                 RoundedRectangle(cornerRadius: 1).fill(barColor(.ollama))
                     .frame(height: max(height * CGFloat(d.ollama) / CGFloat(maxV), 1.5))
@@ -634,6 +640,8 @@ struct MenuView: View {
                     .frame(height: d.codex > 0 ? max(height * CGFloat(d.codex) / CGFloat(maxV), 1.5) : 0)
                 RoundedRectangle(cornerRadius: 1).fill(barColor(.ollama))
                     .frame(height: d.ollama > 0 ? max(height * CGFloat(d.ollama) / CGFloat(maxV), 1.5) : 0)
+                RoundedRectangle(cornerRadius: 1).fill(barColor(.lmStudio))
+                    .frame(height: d.lmStudio > 0 ? max(height * CGFloat(d.lmStudio) / CGFloat(maxV), 1.5) : 0)
             }
         }
     }
@@ -826,7 +834,7 @@ struct MenuView: View {
         return RoundedRectangle(cornerRadius: 3)
             .fill(future ? Color.clear : heatColor(d, maxV))
             .frame(width: 13, height: 13)
-            .help(future ? "" : "\(Self.dayFmt.string(from: d.day)): \(Fmt.compact(d.total)) tokens (Claude \(Fmt.compact(d.claude)) · Codex \(Fmt.compact(d.codex)) · Ollama \(Fmt.compact(d.ollama)))\(chartIncludeCache ? " · incl. cache" : "")")
+            .help(future ? "" : "\(Self.dayFmt.string(from: d.day)): \(Fmt.compact(d.total)) tokens (Claude \(Fmt.compact(d.claude)) · Codex \(Fmt.compact(d.codex)) · Ollama \(Fmt.compact(d.ollama)) · LM Studio \(Fmt.compact(d.lmStudio)))\(chartIncludeCache ? " · incl. cache" : "")")
     }
 
     private func heatColor(_ d: DayStat, _ maxV: Int) -> Color {
@@ -838,7 +846,8 @@ struct MenuView: View {
         let t = Double(d.total)
         guard let base = palette.blend(claude: Double(d.claude) / t,
                                        codex: Double(d.codex) / t,
-                                       ollama: Double(d.ollama) / t) else {
+                                       ollama: Double(d.ollama) / t,
+                                       lmStudio: Double(d.lmStudio) / t) else {
             return Color.gray.opacity(0.18)
         }
         // Opacity encodes total volume (more usage = stronger), orthogonal to hue.
@@ -859,6 +868,7 @@ struct MenuView: View {
             claudeSourceGroup
             codexSourceGroup
             ollamaSourceGroup
+            lmStudioSourceGroup
 
             clusterHeader("Display")
             menuBarGroup
@@ -1020,6 +1030,31 @@ struct MenuView: View {
                     .help("Copies the env vars that point Claude Code at Ollama through the proxy")
             }
         }
+    }
+
+    private var lmStudioSourceGroup: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            sectionTitle("LM Studio")
+            Text("Meters every LM Studio inference — the app's own chats, the lms CLI, and any client pointed at the local server — via `lms log stream`. Reads only token counts, never prompts or replies.")
+                .font(.system(size: 11)).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: 6) {
+                Image(systemName: lmStudioDetected ? "checkmark.circle.fill" : "minus.circle")
+                    .foregroundStyle(lmStudioDetected ? .green : .secondary).font(.system(size: 11))
+                Text(lmStudioDetected ? "LM Studio detected" : "LM Studio not detected")
+                    .font(.system(size: 11.5))
+            }
+            if !lmStudioDetected {
+                Text("Install LM Studio and its command-line tool (lms) to enable tracking.")
+                    .font(.system(size: 9.5)).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    private var lmStudioDetected: Bool {
+        let p = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".lmstudio/bin/lms").path
+        return FileManager.default.isExecutableFile(atPath: p)
     }
 
     // MARK: Display

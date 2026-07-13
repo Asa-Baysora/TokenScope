@@ -25,6 +25,7 @@ enum BrandMark {
         case .claudeCode: b64 = claudeMark
         case .codex:      b64 = codexMark
         case .ollama:     b64 = ollamaMark
+        case .lmStudio:   b64 = lmStudioMark
         }
         let img = Data(base64Encoded: b64).flatMap { NSImage(data: $0) } ?? NSImage()
         img.isTemplate = true
@@ -220,15 +221,46 @@ enum BrandMark {
         "uz5fiqCSBzOg5W6nYOkIg1QdQPtAgT25otoyoOVu89pcdi2VqgP06eq2y9WHXa6qiywZ0HLXO4sjyTZVB9D8rJIqr+TBDGi5034xFHRsDLSGMzYxR85MK2rC" +
         "DKTqAPzsW6JNJEUlD2ZAy52W86BjY5CqA2ifeVV7ACbb2Y/cC5CIXwfnplQd4H0FSZL1quK/lVW7KMEtUnTRqlQdQFuvco9gYDSiytBkYBBOtP2V141hnmOq" +
         "DsBf/Wh0pKasdN4MhHKmvS30Oqy3cAEqMPvU7nEedKk6W73jKIv/FwCEfwXMzSWv300F8v+wGVkQ8Af0RgAAAABJRU5ErkJggg=="
+
+    private static let lmStudioMark =
+        "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"
 }
 
 /// A provider's brand mark tinted in its accent color — the drop-in replacement
 /// for the small colored provider dots used across the menu.
 struct BrandMarkView: View {
     // Leaf-observe the palette so a color edit re-renders the mark even when
-    // SwiftUI would otherwise diff this view as unchanged by its stored props
-    // (origin/size/tint identical) and skip body — which would leave the
-    // untracked BrandMark.color read stale.
+    // SwiftUI would otherwise diff this view as unchanged by its stored props.
     @ObservedObject private var palette = ProviderPalette.shared
     let origin: UsageOrigin
     var size: CGFloat = 12

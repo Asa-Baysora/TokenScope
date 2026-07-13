@@ -1,8 +1,9 @@
 # TokenScope
 
 macOS menu bar app showing local LLM token usage — per call, per session, per day —
-for **Claude Code**, **Codex**, and **Ollama**, plus optional **claude.ai** and
-experimental **ChatGPT** plan-limit views plus Claude and OpenAI service status.
+for **Claude Code**, **Codex**, **Ollama**, and **LM Studio**, plus optional
+**claude.ai** and experimental **ChatGPT** plan-limit views plus Claude and OpenAI
+service status.
 
 ## How it measures
 
@@ -31,21 +32,28 @@ Token usage comes from two independent sources, reconciled automatically:
    both sources (Claude Code routed through the proxy), the proxy copy is shadowed
    so totals count it once.
 
+4. **LM Studio** (`lms log stream --source model`). TokenScope taps LM Studio's
+   shared inference layer, so it meters **every** LM Studio inference — the desktop
+   app's own chats, the `lms` CLI, and any client pointed at the local server
+   (`:1234`) — each with exact token counts, whether or not the HTTP server is
+   running. It reads only the token-count stats and model id, never the prompt or
+   reply text. Requires the LM Studio command-line tool (`lms`, v0.3.26+).
+
 Two more panels track things tokens alone don't tell you (features adapted from
 [ClaudeUsageBar](https://github.com/Artzainnn/ClaudeUsageBar)):
 
-4. **claude.ai plan limits** (optional). Paste your claude.ai Cookie header in Settings and
+5. **claude.ai plan limits** (optional). Paste your claude.ai Cookie header in Settings and
    the Now tab shows your 5-hour session and 7-day weekly utilization as
    color-coded bars with reset countdowns, and alerts you at 25/50/75/90%. This is
    the "how close am I to being throttled" view. Uses an unofficial claude.ai
    endpoint; the cookie is stored locally and sent only to claude.ai.
 
-5. **ChatGPT web limits** (experimental, optional). Paste a ChatGPT Cookie header
+6. **ChatGPT web limits** (experimental, optional). Paste a ChatGPT Cookie header
    and TokenScope queries ChatGPT's private usage surface for whatever limit windows
    it returns. This is intentionally limits-only: ChatGPT web conversations do not
    provide a reliable local per-chat token transcript. The endpoint may change.
 
-6. **Service status**. Polls the public Claude and OpenAI status pages so you can
+7. **Service status**. Polls the public Claude and OpenAI status pages so you can
    tell whether either provider is degraded — shown in the footer, with optional
    per-provider change alerts.
 

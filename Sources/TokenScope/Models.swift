@@ -7,6 +7,7 @@ enum UsageOrigin: String, CaseIterable {
     case claudeCode
     case codex
     case ollama
+    case lmStudio
 
     /// Claude Code can be configured to talk to Ollama. In that case its
     /// transcript is still the durable source, but the tokens belong to Ollama.
@@ -19,6 +20,7 @@ enum UsageOrigin: String, CaseIterable {
         case .claudeCode: return "Claude"
         case .codex: return "Codex"
         case .ollama: return "Ollama"
+        case .lmStudio: return "LM Studio"
         }
     }
 }
@@ -27,6 +29,7 @@ enum EventSource: String {
     case transcript // parsed from a Claude Code session JSONL
     case codexTranscript // parsed from a local Codex rollout JSONL
     case proxy      // observed by the local Ollama proxy
+    case lmStudioLog // observed via `lms log stream --source model`
 }
 
 struct UsageEvent: Identifiable {
@@ -120,9 +123,10 @@ struct DayStat: Identifiable {
     var claude = 0
     var codex = 0
     var ollama = 0
+    var lmStudio = 0
 
     var id: Date { day }
-    var total: Int { claude + codex + ollama }
+    var total: Int { claude + codex + ollama + lmStudio }
 }
 
 /// One calendar day's frozen totals, persisted once the day leaves the live
@@ -138,12 +142,16 @@ struct DayAgg: Codable, Equatable {
     var ollamaIn = 0
     var ollamaOut = 0
     var ollamaCache = 0
+    var lmStudioIn = 0
+    var lmStudioOut = 0
+    var lmStudioCache = 0
     var calls = 0
 
     var claude: Int { claudeIn + claudeOut }
     var codex: Int { codexIn + codexOut }
     var ollama: Int { ollamaIn + ollamaOut }
-    var total: Int { claude + codex + ollama }
+    var lmStudio: Int { lmStudioIn + lmStudioOut }
+    var total: Int { claude + codex + ollama + lmStudio }
 
     // Cache-inclusive variants for long-range views (heatmap) so they can
     // honor the same "include cache" setting the bar chart uses. Days frozen
@@ -152,6 +160,7 @@ struct DayAgg: Codable, Equatable {
     var claudeWithCache: Int { claude + claudeCache }
     var codexWithCache: Int { codex + codexCache }
     var ollamaWithCache: Int { ollama + ollamaCache }
+    var lmStudioWithCache: Int { lmStudio + lmStudioCache }
 
     /// Older history files predate Codex (and, later, cache fields). Decode
     /// absent keys as zero so users keep their accumulated heatmap data across
@@ -160,6 +169,7 @@ struct DayAgg: Codable, Equatable {
         case claudeIn, claudeOut, claudeCache
         case codexIn, codexOut, codexCache
         case ollamaIn, ollamaOut, ollamaCache
+        case lmStudioIn, lmStudioOut, lmStudioCache
         case calls
     }
 
@@ -176,6 +186,9 @@ struct DayAgg: Codable, Equatable {
         ollamaIn = try c.decodeIfPresent(Int.self, forKey: .ollamaIn) ?? 0
         ollamaOut = try c.decodeIfPresent(Int.self, forKey: .ollamaOut) ?? 0
         ollamaCache = try c.decodeIfPresent(Int.self, forKey: .ollamaCache) ?? 0
+        lmStudioIn = try c.decodeIfPresent(Int.self, forKey: .lmStudioIn) ?? 0
+        lmStudioOut = try c.decodeIfPresent(Int.self, forKey: .lmStudioOut) ?? 0
+        lmStudioCache = try c.decodeIfPresent(Int.self, forKey: .lmStudioCache) ?? 0
         calls = try c.decodeIfPresent(Int.self, forKey: .calls) ?? 0
     }
 
@@ -194,6 +207,10 @@ struct DayAgg: Codable, Equatable {
             ollamaIn += e.inputTokens
             ollamaOut += e.outputTokens
             ollamaCache += cache
+        case .lmStudio:
+            lmStudioIn += e.inputTokens
+            lmStudioOut += e.outputTokens
+            lmStudioCache += cache
         }
         calls += 1
     }
@@ -208,6 +225,9 @@ struct DayAgg: Codable, Equatable {
         ollamaIn += o.ollamaIn
         ollamaOut += o.ollamaOut
         ollamaCache += o.ollamaCache
+        lmStudioIn += o.lmStudioIn
+        lmStudioOut += o.lmStudioOut
+        lmStudioCache += o.lmStudioCache
         calls += o.calls
     }
 }

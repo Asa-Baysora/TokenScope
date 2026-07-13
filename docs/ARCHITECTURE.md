@@ -75,10 +75,21 @@ usage-bearing line falls back to regex extraction. Calls with zero output
 This is the only source that sees tokens **while they stream**, and the only
 one that sees non-Claude-Code Ollama clients (`OLLAMA_HOST=127.0.0.1:11435`).
 
-**4. `/api/ps` poller** (`OllamaStatusPoller`): every 10s, which model(s) are
+**4. LM Studio** (`LMStudioLogWatcher`). Spawns `lms log stream --source model
+--stats --json` (from `~/.lmstudio/bin`) and parses the newline-JSON
+`llm.prediction.output` events. Because this taps LM Studio's shared inference
+core rather than the HTTP port, it captures **every** LM Studio inference — the
+desktop app's own chats, the `lms` CLI, and any client on the local server
+(`:1234`) — each with exact `stats.{promptTokensCount, predictedTokensCount}`.
+It reads only those counts + `modelIdentifier`; the prompt/reply text in the
+stream is never touched. Live-only (no history before launch); no HTTP server
+required. Restarts the subprocess on exit (30s backoff); no-ops when `lms` is
+absent. Requires the CLI's `--source model --stats` (v0.3.26+).
+
+**5. `/api/ps` poller** (`OllamaStatusPoller`): every 10s, which model(s) are
 resident in Ollama's memory + VRAM, for the "Now" zone.
 
-**5. claude.ai plan limits** (`LimitsManager`): polls `claude.ai/api/organizations/{orgId}/usage`
+**6. claude.ai plan limits** (`LimitsManager`): polls `claude.ai/api/organizations/{orgId}/usage`
 every 5 min using the user's claude.ai Cookie header (pasted in Settings, stored
 in app preferences). Parses `five_hour` / `seven_day` / `seven_day_sonnet`
 `utilization` (%) + `resets_at`. Org ID comes from the `lastActiveOrg` cookie
@@ -88,12 +99,12 @@ Unofficial endpoint — degrades gracefully (no cookie → connect prompt;
 weekly 50/75/90%) via `ThresholdTracker`, which fires each band once per climb
 and re-arms on drop. Adapted from github.com/Artzainnn/ClaudeUsageBar.
 
-**6. ChatGPT web limits** (`ChatGPTLimitsManager`): an opt-in, private endpoint
+**7. ChatGPT web limits** (`ChatGPTLimitsManager`): an opt-in, private endpoint
 adapter using a pasted ChatGPT Cookie header. It recognizes returned percentage,
 duration, and reset concepts without fabricating token totals. It is isolated from
 local telemetry because the web response can change independently.
 
-**7. Service status** (`StatusManager`): polls both public Statuspage summaries —
+**8. Service status** (`StatusManager`): polls both public Statuspage summaries —
 `status.claude.com/api/v2/summary.json` and `status.openai.com/api/v2/summary.json`
 (no auth) every 5 min for overall indicators, non-operational components, and
 active incidents; each provider has its own notification preference and status-page

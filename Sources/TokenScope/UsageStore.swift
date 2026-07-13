@@ -436,6 +436,7 @@ final class UsageStore: ObservableObject {
             case .claudeCode: stat.claude += tokens
             case .codex: stat.codex += tokens
             case .ollama: stat.ollama += tokens
+            case .lmStudio: stat.lmStudio += tokens
             }
             by[day] = stat
         }
@@ -458,6 +459,7 @@ final class UsageStore: ObservableObject {
             case .claudeCode: out[h].claude += tokens
             case .codex: out[h].codex += tokens
             case .ollama: out[h].ollama += tokens
+            case .lmStudio: out[h].lmStudio += tokens
             }
         }
         return out
@@ -483,6 +485,7 @@ final class UsageStore: ObservableObject {
             case .claudeCode: stat.claude += tokens
             case .codex: stat.codex += tokens
             case .ollama: stat.ollama += tokens
+            case .lmStudio: stat.lmStudio += tokens
             }
             window[k] = stat
         }
@@ -497,6 +500,7 @@ final class UsageStore: ObservableObject {
                 stat.claude += includeCache ? h.claudeWithCache : h.claude
                 stat.codex += includeCache ? h.codexWithCache : h.codex
                 stat.ollama += includeCache ? h.ollamaWithCache : h.ollama
+                stat.lmStudio += includeCache ? h.lmStudioWithCache : h.lmStudio
             }
             out.append(stat)
         }
@@ -506,6 +510,7 @@ final class UsageStore: ObservableObject {
     private func sessionTitle(for key: String, sample e: UsageEvent) -> String {
         if e.source == .proxy { return "Ollama (direct)" }
         if let name = sessionNames[key] { return name }
+        if e.provider == .lmStudio { return "LM Studio · \(e.model)" }
         if e.provider == .codex {
             return e.projectName.map { "Codex · \($0)" } ?? "Codex session \(String(key.prefix(8)))"
         }

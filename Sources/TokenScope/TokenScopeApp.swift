@@ -9,6 +9,7 @@ final class AppServices {
     let codexWatcher: CodexTranscriptWatcher
     let proxy: OllamaProxy
     let ollamaStatus: OllamaStatusPoller
+    let lmStudio: LMStudioLogWatcher
     let limits: LimitsManager
     let openAILimits: OpenAILimitsManager
     let chatGPTLimits: ChatGPTLimitsManager
@@ -25,6 +26,7 @@ final class AppServices {
         codexWatcher = CodexTranscriptWatcher(store: s, limits: openAILimits)
         proxy = OllamaProxy(store: s)
         ollamaStatus = OllamaStatusPoller(store: s)
+        lmStudio = LMStudioLogWatcher(store: s)
         limits = LimitsManager()
         chatGPTLimits = ChatGPTLimitsManager()
         status = StatusManager()
@@ -44,6 +46,7 @@ final class AppServices {
         codexWatcher.start()              // registers observers; scans only if local is active
         proxy.start()
         ollamaStatus.start()
+        lmStudio.start()                  // taps `lms log stream`; no-ops if LM Studio/CLI absent
         limits.start()
         if codexCookie { chatGPTLimits.start() }   // poll only when cookie is the source
         status.start()

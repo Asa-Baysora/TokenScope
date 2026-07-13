@@ -19,9 +19,10 @@ final class ProviderPalette: ObservableObject {
     /// swatch out of the box (hex resolves identically in the headless binary,
     /// unlike system `.orange`/`.purple`/`.blue`).
     private static let fallbackHex: [UsageOrigin: String] = [
-        .claudeCode: "#F5942E",
-        .codex:      "#B052DE",
-        .ollama:     "#5A9EFA",
+        .claudeCode: "#F5942E",   // orange
+        .codex:      "#34C759",   // green
+        .ollama:     "#5A9EFA",   // blue
+        .lmStudio:   "#B052DE",   // purple
     ]
 
     private func key(_ o: UsageOrigin) -> String {
@@ -29,6 +30,7 @@ final class ProviderPalette: ObservableObject {
         case .claudeCode: return "ProviderColorClaude"
         case .codex:      return "ProviderColorCodex"
         case .ollama:     return "ProviderColorOllama"
+        case .lmStudio:   return "ProviderColorLMStudio"
         }
     }
 
@@ -87,15 +89,15 @@ final class ProviderPalette: ObservableObject {
     /// with capped, guarded chroma restoration so near-complementary pairs (the
     /// common Claude+Ollama day) don't collapse to grey mud. Weights need not sum
     /// to 1; returns nil when all are zero.
-    func blend(claude wc: Double, codex wx: Double, ollama wo: Double) -> Color? {
-        let sum = wc + wx + wo
+    func blend(claude wc: Double, codex wx: Double, ollama wo: Double, lmStudio wl: Double) -> Color? {
+        let sum = wc + wx + wo + wl
         guard sum > 0 else { return nil }
-        let c = oklab(.claudeCode), x = oklab(.codex), o = oklab(.ollama)
-        let L = (wc * c.L + wx * x.L + wo * o.L) / sum
-        var a = (wc * c.a + wx * x.a + wo * o.a) / sum
-        var b = (wc * c.b + wx * x.b + wo * o.b) / sum
+        let c = oklab(.claudeCode), x = oklab(.codex), o = oklab(.ollama), l = oklab(.lmStudio)
+        let L = (wc * c.L + wx * x.L + wo * o.L + wl * l.L) / sum
+        var a = (wc * c.a + wx * x.a + wo * o.a + wl * l.a) / sum
+        var b = (wc * c.b + wx * x.b + wo * o.b + wl * l.b) / sum
         let cMix = (a * a + b * b).squareRoot()
-        let cTarget = (wc * hypot(c.a, c.b) + wx * hypot(x.a, x.b) + wo * hypot(o.a, o.b)) / sum
+        let cTarget = (wc * hypot(c.a, c.b) + wx * hypot(x.a, x.b) + wo * hypot(o.a, o.b) + wl * hypot(l.a, l.b)) / sum
         if cMix > 1e-4 {
             let k = min(cTarget / cMix, 1.6)   // lift mud, cap phantom saturation
             a *= k; b *= k

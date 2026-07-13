@@ -18,7 +18,7 @@ TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
 # icon name in Simple Icons -> logical mark name used in the Swift source
-declare -a ICONS=("claude:claude" "openai:codex" "ollama:ollama")
+declare -a ICONS=("claude:claude" "openai:codex" "ollama:ollama" "lmstudio:lmstudio")
 
 for pair in "${ICONS[@]}"; do
   src="${pair%%:*}"
@@ -66,7 +66,7 @@ func chunked(_ s: String, _ width: Int = 120) -> String {
     return parts.joined(separator: " +\n")
 }
 
-let claude = mask("claude"), codex = mask("openai"), ollama = mask("ollama")
+let claude = mask("claude"), codex = mask("openai"), ollama = mask("ollama"), lmStudio = mask("lmstudio")
 let src = """
 import SwiftUI
 import AppKit
@@ -95,6 +95,7 @@ enum BrandMark {
         case .claudeCode: b64 = claudeMark
         case .codex:      b64 = codexMark
         case .ollama:     b64 = ollamaMark
+        case .lmStudio:   b64 = lmStudioMark
         }
         let img = Data(base64Encoded: b64).flatMap { NSImage(data: $0) } ?? NSImage()
         img.isTemplate = true
@@ -116,6 +117,9 @@ enum BrandMark {
 
     private static let ollamaMark =
 \(chunked(ollama))
+
+    private static let lmStudioMark =
+\(chunked(lmStudio))
 }
 
 /// A provider's brand mark tinted in its accent color — the drop-in replacement
