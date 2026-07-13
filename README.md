@@ -95,8 +95,9 @@ ollama run gemma4:12b-mlx
 The window separates the two things it measures by **scope**:
 
 - **claude.ai limits** (always-visible header) — your session (5h) and weekly (7d)
-  utilization as color-coded bars (green < 70%, gradient to yellow by 80%, to red
-  by 90%) with reset countdowns and a refresh button, or a "Connect claude.ai"
+  utilization as color-coded bars (green → yellow → red as you approach the cap;
+  exact bands in [REFERENCE §10](docs/REFERENCE.md#10-the-menu-bar-label-and-gauge))
+  with reset countdowns and a refresh button, or a "Connect claude.ai"
   prompt if no cookie is set. Labeled *whole account* because it covers claude.ai
   web + desktop + Claude Code (but not Ollama). A click away in the four tabs is
   everything denominated in **local tokens** (Claude Code + Ollama on this Mac):
@@ -127,8 +128,9 @@ The **footer** (always visible) shows Claude and OpenAI service status, each lin
 to its public status page. The **menu bar gauge** tints green/yellow/red to your nearest
 limit (or the service-status color). By default the menu bar shows today's total
 tokens (a live `↓` counter while a call streams through the proxy); enable session
-and/or weekly limit % in Settings to show those too — each colored green < 70%,
-yellow < 90%, red ≥ 90%.
+and/or weekly limit % in Settings to show those too — each colored on the same
+green → yellow → red ramp (exact bands in
+[REFERENCE §10](docs/REFERENCE.md#10-the-menu-bar-label-and-gauge)).
 
 Proxy events persist in `~/Library/Application Support/TokenScope/proxy-events.jsonl`.
 
@@ -157,6 +159,14 @@ Events are also appended to `~/Library/Logs/TokenScope.log` for debugging.
   undocumented web endpoints using your own session cookie (stored locally, sent
   only to that service). They are unofficial, may break without notice, and such
   use may be subject to those services' terms of service.
+
+## Documentation
+
+- [`docs/REFERENCE.md`](docs/REFERENCE.md) — the complete, authoritative reference:
+  every data source, rule, constant, preference key, and the build/release process,
+  written so an AI or new engineer can understand the whole app without reading source.
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — a one-screen overview.
+- [`CLAUDE.md`](CLAUDE.md) — build commands + the do-not-regress checklist for coding agents.
 
 ## License
 

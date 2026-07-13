@@ -7,8 +7,13 @@ routed through its local proxy, and LM Studio (via `lms log stream --source
 model`, which captures the app's own chats, the `lms` CLI, and `:1234` clients —
 counts only, never prompt/reply text). It also tracks claude.ai plan limits,
 observed Codex quota windows, experimental ChatGPT web limits, and Claude/OpenAI
-service status. See
-`docs/ARCHITECTURE.md` for the full design.
+service status.
+
+**`docs/REFERENCE.md` is the complete, authoritative reference** — every subsystem,
+rule, and constant, written so an AI can understand the app without reading source.
+Read it before any non-trivial change. `docs/ARCHITECTURE.md` is a one-screen overview
+that points there. The sections below are the terse always-loaded working checklist;
+`REFERENCE.md` carries the full rationale for each item.
 
 UI is tabbed (Now / Usage / History / Settings); sections within a tab are
 collapsible (persisted) and hideable from Settings.
