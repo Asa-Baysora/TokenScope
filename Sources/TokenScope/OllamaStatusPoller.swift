@@ -53,9 +53,15 @@ final class OllamaStatusPoller {
 
     private func fetchModels() {
         request("/api/ps") { [weak self] data, response, _ in
-            guard let self, response?.statusCode == 200 else { return }
+            guard let self else { return }
+            // A failed poll (daemon stopped, port unreachable) must BLANK the list —
+            // early-returning kept the last value, leaving a phantom "loaded model"
+            // row beside an "unavailable" health state. Falling through with an
+            // empty list also fires the fingerprint log on the transition.
+            // (Matches LMStudioStatusPoller.)
             var models: [LoadedModel] = []
-            if let data,
+            if response?.statusCode == 200,
+               let data,
                let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                let array = object["models"] as? [[String: Any]] {
                 let iso = ISO8601DateFormatter()

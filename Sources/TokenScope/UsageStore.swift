@@ -154,14 +154,22 @@ final class UsageStore: ObservableObject {
 
     private func reconcileDuplicates(around event: UsageEvent) {
         guard event.provider == .ollama else { return }
-        if (event.source == .proxy || event.source == .transcript), event.tokenAccuracy == .exact {
+        if event.source == .proxy || event.source == .transcript {
             let counterpart: EventSource = event.source == .proxy ? .transcript : .proxy
             for i in events.indices.reversed().prefix(80) {
                 let candidate = events[i]
                 guard candidate.id != event.id, candidate.source == counterpart,
-                      !candidate.shadowed, candidate.tokenAccuracy == .exact,
+                      !candidate.shadowed,
                       abs(candidate.timestamp.timeIntervalSince(event.timestamp)) < 90,
                       abs(candidate.outputTokens - event.outputTokens) <= 2 else { continue }
+                // Only the TRANSCRIPT side of the pair must carry exact usage (it
+                // always does, by construction). The proxy side may be estimated
+                // (stream ended without a usage record) or unknown (migrated from
+                // the legacy journal) — its counts came from the same bytes, so the
+                // ±2-token match is still meaningful. Requiring .exact on BOTH
+                // sides left every non-exact proxy copy permanently double-counted.
+                let transcript = event.source == .transcript ? event : candidate
+                guard transcript.tokenAccuracy == .exact else { continue }
                 if candidate.source == .proxy {
                     events[i].shadowed = true
                 } else if let eventIndex = events.firstIndex(where: { $0.id == event.id }) {
@@ -297,8 +305,12 @@ final class UsageStore: ObservableObject {
                 byOut[e.outputTokens, default: []].append(e.timestamp)
             }
             var shadowed = 0
+            // Proxy-side accuracy is deliberately NOT gated here: estimated and
+            // legacy-migrated (.unknown) proxy events are exactly the copies that
+            // need shadowing against their exact transcript twins. The transcript
+            // index above already requires .exact on the authoritative side.
             for i in self.events.indices where self.events[i].source == .proxy
-                && !self.events[i].shadowed && self.events[i].tokenAccuracy == .exact {
+                && !self.events[i].shadowed {
                 let e = self.events[i]
                 search: for delta in -2...2 {
                     if let dates = byOut[e.outputTokens + delta],

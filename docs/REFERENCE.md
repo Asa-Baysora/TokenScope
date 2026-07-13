@@ -496,14 +496,21 @@ provider-owned `loadedModels`, `runtimeHealth`, `history: [String: DayAgg]` (key
 ### 7.4 Double-count prevention (shadowing)
 A Claude Code call routed through the proxy is observed **twice** (proxy + transcript).
 Exactly one copy is counted:
-- **Runtime, transcript arrives second:** `addTranscriptEvent` scans the last ~60
-  events for a `proxy`, non-shadowed Ollama event within **±90 s** and **±2 output
-  tokens**; marks it `shadowed`.
-- **Runtime, proxy finishes second:** `finishLiveCall` does the reverse scan against
-  recent transcript events (±90 s, ±2 tokens).
-- **Startup:** `replayFinished` sorts events, indexes **exact** transcript Ollama events by
+- **Runtime** (`reconcileDuplicates`, either arrival order): scans the last ~80 events
+  for the counterpart source (proxy↔transcript) within **±90 s** and **±2 output
+  tokens**; the proxy copy is marked `shadowed`.
+- **Startup:** `replayFinished` sorts events, indexes transcript Ollama events by
   output count, and shadows any persisted proxy event matching within **±120 s** and
   **±2 tokens** (the wider window covers bulk replay ordering).
+- **Accuracy rule (both paths):** only the **transcript** side of a pair must be
+  `tokenAccuracy == .exact` (it always is, by construction). The **proxy** side may be
+  `.estimated` (stream ended without a usage record) or `.unknown` (migrated from the
+  legacy `proxy-events.jsonl`) — its counts came from the same relayed bytes, so the
+  ±2-token match stays meaningful. Requiring `.exact` on both sides is a known-bad
+  regression: it permanently double-counts every non-exact proxy copy.
+- **Ollama Desktop** metadata events are separately shadowed against overlapping proxy
+  observations (`EventReconciler.desktopAndProxyOverlap`), so a Desktop call that was
+  also proxied counts once.
 - Shadowed events are excluded from **every** aggregate and from the heatmap, but kept
   in the "Latest calls" log.
 
