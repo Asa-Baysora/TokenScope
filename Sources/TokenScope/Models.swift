@@ -228,6 +228,10 @@ struct Totals {
     var cacheCreate = 0
     var reasoning = 0
     var calls = 0
+    /// Calls observed with no token data at all (e.g. Ollama Desktop metadata,
+    /// which never persists runtime counts). Kept separate so the UI can say
+    /// "tokens unavailable" instead of fabricating a "↑ 0 ↓ 0".
+    var unmetered = 0
 
     mutating func add(_ e: UsageEvent) {
         input += e.inputTokens
@@ -236,6 +240,9 @@ struct Totals {
         cacheCreate += e.cacheCreationTokens
         reasoning += e.reasoningTokens
         calls += 1
+        if e.tokenAccuracy == .unknown && e.inputTokens == 0 && e.outputTokens == 0 {
+            unmetered += 1
+        }
     }
 }
 

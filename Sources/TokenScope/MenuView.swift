@@ -777,8 +777,8 @@ struct MenuView: View {
                 HStack(spacing: 6) {
                     Text(m.model).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
                     Spacer()
-                    Text("↑ \(Fmt.compact(m.totals.input))  ↓ \(Fmt.compact(m.totals.output))  · \(m.totals.calls) calls")
-                        .font(.system(size: 11)).foregroundStyle(.secondary).monospacedDigit()
+                    Text(modelDetail(m.totals))
+                        .font(.system(size: 11)).foregroundStyle(.secondary).monospacedDigit().fixedSize()
                 }
                 .padding(.leading, 17)
             }
@@ -789,31 +789,67 @@ struct MenuView: View {
         }
     }
 
+    /// "1 call" / "2,054 calls" — locale grouping matches what SwiftUI's own
+    /// integer interpolation produced before these strings were built by hand.
+    private func calls(_ n: Int) -> String { n == 1 ? "1 call" : "\(n.formatted()) calls" }
+
+    /// Per-model detail line. All-unmetered models (Ollama Desktop) say so
+    /// instead of "↑ 0 ↓ 0"; mixed models carry the unmetered count so the
+    /// token totals aren't silently read as covering every call.
+    private func modelDetail(_ t: Totals) -> String {
+        if t.unmetered == t.calls { return "no token data · \(calls(t.calls))" }
+        let unmetered = t.unmetered > 0 ? " · \(t.unmetered) unmetered" : ""
+        return "↑ \(Fmt.compact(t.input))  ↓ \(Fmt.compact(t.output))  · \(calls(t.calls))\(unmetered)"
+    }
+
+    /// Provider header, two lines: name + call count, then the metrics on their
+    /// own indented line. The old single HStack (name + up to four metrics +
+    /// calls) wrapped unpredictably once numbers got wide — "reasoning" broke
+    /// mid-word, and the fixed 52pt name column split "LM Studio" in two.
+    /// Giving metrics a full line and the name its natural width keeps every
+    /// width stable regardless of magnitude.
     private func providerRow(_ p: UsageOrigin) -> some View {
         let t = store.totals(for: p, in: period)
-        return HStack(spacing: 6) {
-            BrandMarkView(origin: p, size: 14)
-            Text(p.displayName).font(.system(size: 12, weight: .medium)).frame(width: 52, alignment: .leading)
-            if t.calls == 0 {
-                Text("—").font(.system(size: 12)).foregroundStyle(.secondary)
-            } else {
-                Text("↑ \(Fmt.compact(t.input))")
-                if t.cacheRead > 0 {
-                    Text("+\(Fmt.compact(t.cacheRead)) cache")
-                        .foregroundStyle(.secondary)
-                        .help("Prompt-cache reads: context re-served from cache on each call instead of resent as fresh input. Billed at ~10% of the input rate.")
-                }
-                Text("↓ \(Fmt.compact(t.output))")
-                if t.reasoning > 0 {
-                    Text("· \(Fmt.compact(t.reasoning)) reasoning")
-                        .foregroundStyle(.secondary)
-                        .help("Reasoning tokens — a subset of output, already counted in ↓, shown here for detail.")
-                }
+        return VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 6) {
+                BrandMarkView(origin: p, size: 14)
+                Text(p.displayName).font(.system(size: 12, weight: .medium)).fixedSize()
                 Spacer()
-                Text("\(t.calls) calls").foregroundStyle(.secondary)
+                Text(t.calls == 0 ? "—" : calls(t.calls))
+                    .font(.system(size: 12)).foregroundStyle(.secondary).monospacedDigit()
+            }
+            if t.calls > 0 {
+                HStack(spacing: 8) {
+                    if t.unmetered == t.calls {
+                        // Every call in this period is metadata-only (Ollama
+                        // Desktop) — say so instead of fabricating "↑ 0 ↓ 0".
+                        Text("tokens unavailable")
+                            .foregroundStyle(.secondary)
+                            .help("Ollama Desktop records its chats without runtime token counts, so these calls can only be counted, not metered. Route clients through the proxy for exact counts.")
+                    } else {
+                        Text("↑ \(Fmt.compact(t.input))").fixedSize()
+                        if t.cacheRead > 0 {
+                            Text("+\(Fmt.compact(t.cacheRead)) cache")
+                                .foregroundStyle(.secondary).fixedSize()
+                                .help("Prompt-cache reads: context re-served from cache on each call instead of resent as fresh input. Billed at ~10% of the input rate.")
+                        }
+                        Text("↓ \(Fmt.compact(t.output))").fixedSize()
+                        if t.reasoning > 0 {
+                            Text("· \(Fmt.compact(t.reasoning)) reasoning")
+                                .foregroundStyle(.secondary).fixedSize()
+                                .help("Reasoning tokens — a subset of output, already counted in ↓, shown here for detail.")
+                        }
+                        if t.unmetered > 0 {
+                            Text("· \(t.unmetered) unmetered")
+                                .foregroundStyle(.secondary).fixedSize()
+                                .help("Calls observed without token counts (Ollama Desktop doesn't persist them). Included in the call count, absent from the token totals.")
+                        }
+                    }
+                }
+                .font(.system(size: 11.5)).monospacedDigit()
+                .padding(.leading, 20)
             }
         }
-        .font(.system(size: 12)).monospacedDigit()
     }
 
     @ViewBuilder private var sessionsContent: some View {
@@ -879,11 +915,16 @@ struct MenuView: View {
             let models = s.models.sorted()
             parts.append(models.count <= 2 ? models.joined(separator: ", ") : "\(models.count) models")
         }
-        parts.append("\(s.totals.calls) calls")
-        parts.append("↑ \(Fmt.compact(s.totals.input))")
-        if s.totals.cacheRead > 0 { parts.append("+\(Fmt.compact(s.totals.cacheRead)) cache") }
-        parts.append("↓ \(Fmt.compact(s.totals.output))")
-        if s.totals.reasoning > 0 { parts.append("\(Fmt.compact(s.totals.reasoning)) reasoning") }
+        parts.append(calls(s.totals.calls))
+        if s.totals.unmetered == s.totals.calls {
+            // Metadata-only session (Ollama Desktop) — no fabricated "↑ 0 ↓ 0".
+            parts.append("no token data")
+        } else {
+            parts.append("↑ \(Fmt.compact(s.totals.input))")
+            if s.totals.cacheRead > 0 { parts.append("+\(Fmt.compact(s.totals.cacheRead)) cache") }
+            parts.append("↓ \(Fmt.compact(s.totals.output))")
+            if s.totals.reasoning > 0 { parts.append("\(Fmt.compact(s.totals.reasoning)) reasoning") }
+        }
         return parts.joined(separator: " · ")
     }
 

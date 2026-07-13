@@ -647,8 +647,15 @@ Two cards, `limitRow` each:
   Stacked order bottom→top: lmStudio, ollama, codex, claude. Per-bar `.help` tooltip
   gives the exact split. `· incl. cache` appears when `ChartIncludeCache` is on.
 - **Providers & models**: one `providerRow` per provider (Claude, Codex, Ollama, LM
-  Studio) with `↑in (+cache) ↓out · N calls` and `· X reasoning` where present, then up
-  to **5** per-model rows (`+ N more models` beyond that).
+  Studio), **two lines each**: name + call count on the first line (name at natural
+  width — never a fixed column, which split "LM Studio"), metrics on their own indented
+  line (`↑in +cache ↓out · reasoning`, every `Text` `fixedSize()`d so wide numbers can
+  never wrap mid-word). Then up to **5** per-model rows (`+ N more models` beyond that).
+  **Unmetered rule:** calls observed without token data (`tokenAccuracy == .unknown`
+  and zero in/out — Ollama Desktop metadata) are tracked in `Totals.unmetered` and
+  displayed honestly: all-unmetered providers/models/sessions say **"tokens
+  unavailable"** / **"no token data"**, mixed ones append `· N unmetered` — the UI
+  never fabricates a `↑ 0 ↓ 0`. (Same rule `callDetail` applies in Latest calls.)
 - **Performance & reliability**: the shared `PerformanceAggregator` summarizes Ollama
   and LM Studio with call/completion/failure/cancellation/estimated counts and medians
   for tokens/sec, TTFT, and duration using only events that report each metric.

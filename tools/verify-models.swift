@@ -105,6 +105,31 @@ struct ModelChecks {
                    "LM Studio uses the shared performance aggregation")
         try expect(PerformanceAggregator.median([]) == nil && PerformanceAggregator.median([1, 3, 2]) == 2,
                    "median boundaries")
+
+        // Totals.unmetered: metadata-only calls (unknown accuracy, zero tokens —
+        // Ollama Desktop) are counted separately so the UI can say "tokens
+        // unavailable" instead of fabricating "↑ 0 ↓ 0". A zero-token call with
+        // EXACT accuracy is a genuine zero, not unmetered.
+        var unmeteredTotals = Totals()
+        unmeteredTotals.add(UsageEvent(
+            timestamp: Date(), provider: .ollama, source: .ollamaDesktop, model: "gemma",
+            sessionId: nil, projectName: nil, inputTokens: 0, outputTokens: 0,
+            cacheReadTokens: 0, cacheCreationTokens: 0, reasoningTokens: 0,
+            tokenAccuracy: .unknown))
+        unmeteredTotals.add(UsageEvent(
+            timestamp: Date(), provider: .ollama, source: .proxy, model: "gemma",
+            sessionId: nil, projectName: nil, inputTokens: 10, outputTokens: 5,
+            cacheReadTokens: 0, cacheCreationTokens: 0, reasoningTokens: 0,
+            tokenAccuracy: .exact))
+        unmeteredTotals.add(UsageEvent(
+            timestamp: Date(), provider: .ollama, source: .proxy, model: "gemma",
+            sessionId: nil, projectName: nil, inputTokens: 0, outputTokens: 0,
+            cacheReadTokens: 0, cacheCreationTokens: 0, reasoningTokens: 0,
+            tokenAccuracy: .exact))
+        try expect(unmeteredTotals.calls == 3 && unmeteredTotals.unmetered == 1
+                   && unmeteredTotals.input == 10 && unmeteredTotals.output == 5,
+                   "Totals.unmetered counts only unknown-accuracy zero-token calls")
+
         print("model checks passed")
     }
 
