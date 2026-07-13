@@ -45,9 +45,12 @@ final class CodexTranscriptWatcher {
     }
 
     func start() {
-        // Only run the file-scanning loop when local is the selected Codex source;
-        // otherwise register the observers and stay idle (no timer firing at all).
-        if enabled { startScanning() }
+        // Local session token tracking is independent of the selected quota
+        // source. Cookie-based limits cover the account, but cannot replace the
+        // per-turn token_count records in ~/.codex/sessions.
+        if CodexTrackingPolicy.tracksLocalSessionTokens(cookieLimitsSelected: !localQuotaEnabled) {
+            startScanning()
+        }
         monitorObserver = NotificationCenter.default.addObserver(
             forName: OpenAILimitsManager.monitoringChanged, object: nil, queue: nil
         ) { [weak self] _ in
@@ -57,7 +60,7 @@ final class CodexTranscriptWatcher {
             forName: OpenAILimitsManager.refreshRequested, object: nil, queue: nil
         ) { [weak self] _ in
             self?.queue.async {
-                guard let self, self.enabled else { return }
+                guard let self, self.localQuotaEnabled else { return }
                 // A normal scan only tails new bytes. Refresh intentionally
                 // replays the current window so the latest saved quota record
                 // is re-observed even if Codex has been idle. Usage events are
@@ -75,7 +78,7 @@ final class CodexTranscriptWatcher {
         }
     }
 
-    private var enabled: Bool { limits.monitoringEnabled }
+    private var localQuotaEnabled: Bool { limits.monitoringEnabled }
 
     private func startScanning() {
         guard timer == nil else { return }
@@ -91,28 +94,23 @@ final class CodexTranscriptWatcher {
         timer = t
     }
 
-    private func stopScanning() {
-        timer?.cancel()
-        timer = nil
-    }
-
     private func monitoringChanged() {
-        guard enabled else {
-            stopScanning()
-            FileLog.log("Codex transcript watcher stopped (not the selected source)")
+        guard localQuotaEnabled else {
+            FileLog.log("Codex local quota observation disabled; session token tracking remains active")
             return
         }
-        if timer == nil {
-            startScanning()
-        } else {
-            offsets = [:]
-            activePaths = []
-            tick = 0
-            bootstrap()
-            scan()
-            finishBackfillIfNeeded()
-        }
-        FileLog.log("Codex transcript watcher resumed")
+        // Replay the live window so the latest saved quota record is observed
+        // immediately after switching back to local limits. Dedup keys are file
+        // offsets, so local token events cannot be counted twice.
+        offsets = [:]
+        activePaths = []
+        sessionMetadata = [:]
+        latestModel = [:]
+        tick = 0
+        bootstrap()
+        scan()
+        finishBackfillIfNeeded()
+        FileLog.log("Codex local quota observation resumed; session token tracking active")
     }
 
     /// Replays the live window and, once per persisted gap, folds up to a year
@@ -156,7 +154,6 @@ final class CodexTranscriptWatcher {
     }
 
     private func scan() {
-        guard enabled else { return }
         if tick % Self.fullScanEveryTicks == 0 {
             fullScan()
         } else {

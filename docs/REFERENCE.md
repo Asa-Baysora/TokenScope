@@ -5,7 +5,8 @@
 > *without reading the Swift source*. Where a fact is load-bearing, the file and the
 > exact value are named so you can jump to it.
 >
-> **Reflects:** v0.1.2 (`CFBundleVersion` 3), commit `c43647c`, 2026-07-13.
+> **Reflects:** v0.1.2 (`CFBundleVersion` 3) plus the local-runtime parity work in
+> this working tree, 2026-07-13.
 > When you change behavior, update this file in the same commit.
 >
 > **Companion docs:** `CLAUDE.md` is the always-loaded working checklist for coding
@@ -74,16 +75,17 @@ source**, and the UI is deliberately split along that seam:
 | Claude Code → Ollama (`ANTHROPIC_BASE_URL`) | ✅ exact | transcript tail (classified as Ollama) | same JSONL usage |
 | Codex app / CLI (local) | ✅ exact | Codex session-log tail | `token_count.last_token_usage` |
 | Ollama via proxy (`ollama run`, scripts, any client → :11435) | ✅ exact + **live** | TCP relay + response scan | `eval_count` / `prompt_eval_count` |
-| Ollama Desktop app's own chats | ❌ | — | GUI talks to its own daemon, bypasses proxy; DB has no counts |
-| LM Studio (GUI chats, `lms` CLI, `:1234` clients) | ✅ exact | `lms log stream` tap | `stats.{promptTokensCount, predictedTokensCount}` |
+| Ollama Desktop app's own chats | ✅ activity; tokens unavailable | metadata-only SQLite watcher | model/chat/timestamps; DB has no runtime token counts |
+| LM Studio completed LLM generations visible in shared model telemetry | ✅ exact | output-only `lms log stream` tap | `stats.{promptTokensCount, predictedTokensCount}` |
 | claude.ai web / Claude desktop | limits-only | claude.ai usage endpoint | utilization %, not tokens |
 | ChatGPT web / desktop | limits-only (experimental) | ChatGPT usage endpoint | utilization %, not tokens |
 | Gemini (any surface) | ❌ (roadmap) | — | — |
 
-**Privacy rule (hard invariant):** TokenScope reads **only token counts + model id**
-from every local source. It never stores or transmits prompt text, reply text, tool
-payloads, or conversation content. The proxy relays bytes verbatim but only *scans*
-for usage numbers; the Codex/LM Studio taps decode only the count-bearing records.
+**Privacy rule (hard invariant):** TokenScope persists **only operational metadata**:
+counts, model/source identity, lifecycle, sanitized error category, and performance
+metrics. It never stores or transmits prompt text, reply text, tool payloads, raw
+provider errors, or conversation content. LM Studio is launched with `--filter output`
+so formatted prompts do not enter TokenScope's process.
 
 **Two units, never mixed:** local sources produce **token counts**; the limit panels
 produce **utilization percentages**. They are never added together or shown in the
@@ -165,12 +167,15 @@ Defined in `Models.swift`. All token integers; money/percent never here.
 ### `UsageEvent` (the atom)
 `Identifiable`. Fields: `id: UUID`, `timestamp: Date`, `provider: UsageOrigin`,
 `source: EventSource`, `model: String`, `sessionId: String?`, `projectName: String?`,
-`inputTokens`, `outputTokens`, `cacheReadTokens`, `cacheCreationTokens`,
-`reasoningTokens` (a **subset of output**, retained for detail, never re-added to the
-headline), and `var shadowed = false`.
+`inputTokens`, `outputTokens`, `cacheReadTokens`, `cacheCreationTokens`, and
+`reasoningTokens` (a **subset of output**, never re-added to the headline). Operational
+fields include token accuracy, operation, status, execution location, endpoint/request
+id, HTTP/finish/error category, duration breakdown, TTFT, and tokens/sec. Errors are
+sanitized categories only. The type is versioned-journal `Codable` and `Equatable`.
 
 ### `LiveCall`
-`id, model, inputTokens, outputTokens, startedAt, lastUpdate`. The proxy upserts these;
+`id, provider, model, inputTokens, outputTokens, outputAccuracy, operation, startedAt,
+lastUpdate`. The proxy upserts these;
 `inputTokens` here = `input + cacheRead`, `outputTokens` = the streaming display count.
 
 ### `Totals`
@@ -189,7 +194,9 @@ this is the green dot in the Sessions list).
 `day: Date` + `claude, codex, ollama, lmStudio` ints; `total` = their sum.
 
 ### `DayAgg` (persisted frozen day) — `Codable, Equatable`
-Per-provider `*In` / `*Out` / `*Cache` ints (Claude, Codex, Ollama, LM Studio) + `calls`.
+Provider-keyed `ProviderDayAgg` values (input/output/cache/reasoning/calls). The
+decoder migrates legacy fixed Claude/Codex/Ollama/LM Studio fields; the encoder writes
+the extensible provider map.
 - Computed: `claude/codex/ollama/lmStudio` = In+Out; `*WithCache` = +Cache; `total` = sum.
 - **Back-compat is deliberate:** a custom `init(from:)` decodes every key with
   `decodeIfPresent(...) ?? 0`. Old history files predate Codex, LM Studio, and the
@@ -232,8 +239,9 @@ how it feeds the store → privacy → limitations.** Source file named in the h
   2. older `{"type":"summary","summary":…}` lines.
   3. first real user message — **fallback only fills a gap**, 60-char-ish cap, skips
      lines starting with `<` (e.g. `<command-…>`) or `Caveat:`.
-- **Feeds store:** `addTranscriptEvent(_, dedupKey:)`. **Dedup key = `message.id:requestId`,
-  first occurrence wins** (streaming rewrites repeat a message across lines).
+- **Feeds store:** `addTranscriptEvent(_, dedupKey:)`. **Dedup key = `message.id:requestId`**;
+  `EventReconciler` retains the strongest observation so final rewrites upgrade partial
+  usage and stale replays cannot downgrade it.
 - **Launch replay:** replays transcripts newer than the events cutoff (~seconds for a
   month) so today is populated immediately; then a one-time backfill covers the gap
   `(historyCompleteThrough, cutoff)` from whatever old transcripts still exist (≤366d);
@@ -262,9 +270,9 @@ how it feeds the store → privacy → limitations.** Source file named in the h
   (`codexHistoryCompleteThrough`) because the Codex log tree is independent of the
   Claude transcript tree; backfills ≤366 days of daily history exactly once, matching
   Claude's launch behavior. Both sources still merge into the *same* day aggregate.
-- **Source gating:** only *scans* when local is the active Codex source (see
-  [§6.7](#67-codex-quota-two-interchangeable-sources)); it always *registers* file
-  observers cheaply.
+- **Source independence:** local session-token scanning always runs. Selecting the
+  cookie limits source disables only local quota-window observation; cookie telemetry
+  does not contain per-turn token usage.
 - **Privacy:** no prompt/reply/tool payload is ever read.
 
 ### 6.3 Local Ollama proxy — `OllamaProxy.swift` → `Relay` → `ResponseScanner.swift`
@@ -274,18 +282,19 @@ how it feeds the store → privacy → limitations.** Source file named in the h
   both directions**. The **only** request mutation is forcing
   `Accept-Encoding: identity` so responses stay uncompressed and scannable (gzip would
   blind the scanner).
-- **Scanning:** a per-connection `ResponseScanner` taps the response direction only.
-  Framing is **newline-based** (NDJSON and SSE are newline-framed; chunked-transfer
-  size markers appear as bare hex lines and are filtered). A JSON-parse failure on a
-  usage-bearing line falls back to **regex extraction** (handles lines split by
-  chunked-transfer framing).
+- **Scanning:** `HTTPRequestScanner` frames Content-Length/chunked requests and keeps
+  only method/path/model/stream/request id/location. `HTTPResponseFramer` removes
+  Content-Length/chunked/close-delimited transport framing and supports keep-alive;
+  `ResponseScanner` then parses NDJSON, SSE, or single JSON bodies. Split request
+  headers are handled by `HTTPIdentityEncodingRewriter` before forwarding.
 - **Three wire formats understood:**
 
   | Format | Detected by | Input tokens | Output tokens | End of call |
   |---|---|---|---|---|
   | Ollama native | `"done"` key | `prompt_eval_count` | `eval_count` | `"done":true` |
   | Anthropic | `"type"` events | `usage.input_tokens` (`message_start`) | `usage.output_tokens` (`message_delta`) | `message_stop` / `"type":"message"` |
-  | OpenAI | `"object"` key | `prompt_tokens` | `completion_tokens` | `chat.completion` / `[DONE]` |
+  | OpenAI | `"object"`/Responses lifecycle | `prompt_tokens`/`input_tokens` | `completion_tokens`/`output_tokens` | object completion / `[DONE]` |
+  | Embedding | endpoint attribution | input usage when returned | n/a | framed response end |
 
 - **Live counter:** while streaming, chunk counts approximate output (`approxOutput`)
   until a real count arrives (`displayOutput = output > 0 ? output : approxOutput`) —
@@ -297,19 +306,39 @@ how it feeds the store → privacy → limitations.** Source file named in the h
   `[DONE]`, the regex fallback, and connection-close all call it; it no-ops once the
   call state is cleared. A 4 MB carry-buffer cap guards a runaway un-newlined stream.
 - **Feeds store:** `upsertLiveCall(...)` during streaming; `finishLiveCall(...)` at end.
-  Finalize **drops calls with zero output** (`count_tokens`, pings, errors). Finished
+  Finalize retains token-bearing calls and failures (including input-only embeddings),
+  while dropping empty successful pings. Finished
   proxy events are `provider = .ollama, source = .proxy, sessionId = "ollama-direct"`,
-  and are **persisted** to `proxy-events.jsonl` (transcripts replay from disk; proxy
-  observations have no other on-disk truth).
-- **Health:** publishes `proxyStatus` / `proxyHealthy` for the Settings row.
+  and are **persisted** to the shared `usage-events-v2.jsonl` journal.
+- **Health:** `/api/version` distinguishes daemon health from proxy-listener health;
+  failures, cancellation, exact/estimated accuracy, cloud-model location, Ollama
+  nanosecond durations, derived tokens/sec, and observed TTFT are retained.
 - **Privacy:** relays bytes but stores only extracted counts + model.
+
+### 6.3.1 Ollama Desktop metadata — `OllamaDesktopWatcher.swift`
+
+- **Why it exists:** Ollama Desktop connects directly to its daemon on `:11434`,
+  bypassing TokenScope's `:11435` proxy.
+- **Source:** read-only access to `~/Library/Application Support/Ollama/db.sqlite`.
+  The query selects only message row id, chat id, model, start/update timestamps, and
+  streaming state. It never selects content, thinking, tool, or attachment columns.
+- **Wakeups/history:** startup replays only the live 31-day metadata window using
+  stable chat/row dedup keys. After that, vnode notifications on the SQLite DB/WAL
+  trigger debounced reads; there is no idle polling loop.
+- **Accuracy boundary:** the desktop schema does not store `prompt_eval_count` or
+  `eval_count`. Completed calls therefore use `tokenAccuracy = unknown` with zero
+  invented tokens and render as `tokens unavailable`; model and duration remain exact
+  to the DB metadata.
+- **Deduplication:** if a matching model/start/end/duration proxy observation exists,
+  the metadata-only desktop record is shadowed and the proxy's stronger evidence wins.
 
 ### 6.4 LM Studio — `LMStudioLogWatcher.swift`
 
-- **What it does:** spawns `lms log stream --source model --stats --json` and reads its
-  NDJSON output. This taps LM Studio's **shared inference core**, not the HTTP port, so
-  it captures **every** LM Studio inference: the desktop app's own chats, the `lms`
-  CLI, and any client on the local server (`:1234`) — **no HTTP server required**.
+- **What it does:** spawns
+  `lms log stream --source model --filter output --stats --json` and reads its NDJSON
+  output. This captures completed LLM-generation telemetry exposed by LM Studio's
+  shared model log without requiring the HTTP API server. The coverage is deliberately
+  not described as "every inference" (embeddings and events lacking stats are absent).
 - **CLI discovery** (`cliCandidates`, first that exists):
   `~/.lmstudio/bin/lms`, `/usr/local/bin/lms`, `/opt/homebrew/bin/lms`. If none exist,
   the provider is simply **off** (no subprocess, no respawn churn).
@@ -317,10 +346,11 @@ how it feeds the store → privacy → limitations.** Source file named in the h
   "llm.prediction.output"`, then reads `data.stats.promptTokensCount` (→ input) and
   `data.stats.predictedTokensCount` (→ output), model = `data.modelIdentifier` ??
   `data.modelPath` ?? `"LM Studio"`, and `obj.timestamp` as **epoch milliseconds**
-  (÷1000). Records with both counts zero are dropped. Cache and reasoning = 0.
+  (epoch seconds/milliseconds or ISO8601). Records with both counts zero are dropped.
+  Reasoning, stop reason, tokens/sec, TTFT, load/duration fields are retained when present.
 - **Ground truth:** LM Studio's own `stats` counts — exact, matches the tokens/sec the
   GUI shows.
-- **Feeds store:** `addTranscriptEvent(...)` with `provider = .lmStudio,
+- **Feeds store:** `addLocalEvent(...)` with `provider = .lmStudio,
   source = .lmStudioLog, sessionId = "lmstudio:<model>"`. The stream has no session id,
   so events group per model. **Dedup key** =
   `"lmstudio:<ts>:<prompt>:<predicted>:<model>"`.
@@ -329,17 +359,18 @@ how it feeds the store → privacy → limitations.** Source file named in the h
 - **Requires:** the CLI's `--source model --stats` flags (LM Studio **v0.3.26+**).
 - **Limitation:** **live-only** — no history before the app launched (there is no
   backfill from `~/.lmstudio/conversations/*.json`; that is a documented fast-follow).
-- **Privacy:** reads only the stats + model id; the prompt/reply text present elsewhere
-  in the stream is never touched.
+- **Privacy:** requests output-only events and persists only stats/model/lifecycle;
+  content fields and raw stderr are discarded.
 
-### 6.5 Ollama `/api/ps` poller — `OllamaStatusPoller.swift`
+### 6.5 Runtime status/model pollers — `OllamaStatusPoller.swift`, `LMStudioStatusPoller.swift`
 
-- **Reads:** `GET http://127.0.0.1:<upstreamPort>/api/ps` every **10 s**
+- **Ollama reads:** documented `/api/version` and `/api/ps` every **10 s**
   (`deadline: .now()+2, repeating: 10.0`, 3 s request timeout). A failed poll blanks
   `loadedModels` rather than keeping the last value.
-- **Produces:** `store.loadedModels` — which model(s) are resident in Ollama's
-  memory + VRAM, shown in the "Now/Activity" tab's Live section (`<name> in memory ·
-  N.N GB`). Not a token source.
+- **LM Studio reads:** `lms --version`, `lms server status --json --quiet`, and
+  `lms ps --json` every **30 s**. Both publish `RuntimeHealth` plus provider-owned
+  `LoadedModel` records; the UI shows version/server/collector coverage and available
+  size, VRAM, context, generation, parallel, and queue metadata. Not token sources.
 
 ### 6.6 claude.ai plan limits — `LimitsManager.swift`
 
@@ -406,9 +437,10 @@ keys (`chatgpt_limit_notified_primary/secondary`) and the same notification ids
 **not** re-fire a band already alerted.
 
 **Startup source selection** (`AppServices.init`): if `CodexSource` is unset, default
-to `"cookie"` when a ChatGPT cookie is already connected, else `"local"`. Then only the
-selected source runs — `openAILimits.monitoringEnabled = !cookie`, and
-`chatGPTLimits.start()` is called **only** when cookie is the source.
+to `"cookie"` when a ChatGPT cookie is already connected, else `"local"`. Only the
+selected *quota* source runs — `openAILimits.monitoringEnabled = !cookie`, and
+`chatGPTLimits.start()` is called only when cookie is the source. The Codex session
+watcher always runs for local per-turn token tracking.
 
 ### 6.8 Service status — `StatusManager.swift` (×2 instances)
 
@@ -439,7 +471,7 @@ metering state and every reconciliation rule. `AppServices` holds one instance.
 
 ### 7.1 State it publishes
 `events: [UsageEvent]` (oldest→newest), `liveCalls`, `proxyStatus`/`proxyHealthy`,
-`loadedModels`, `history: [String: DayAgg]` (keyed `yyyy-MM-dd`), `sessionNames`,
+provider-owned `loadedModels`, `runtimeHealth`, `history: [String: DayAgg]` (keyed `yyyy-MM-dd`), `sessionNames`,
 `now`. Plus non-published watermarks `historyCompleteThrough`,
 `codexHistoryCompleteThrough`, and the resolved `proxyPort`/`upstreamPort`.
 
@@ -469,17 +501,18 @@ Exactly one copy is counted:
   tokens**; marks it `shadowed`.
 - **Runtime, proxy finishes second:** `finishLiveCall` does the reverse scan against
   recent transcript events (±90 s, ±2 tokens).
-- **Startup:** `replayFinished` sorts events, indexes transcript Ollama events by
+- **Startup:** `replayFinished` sorts events, indexes **exact** transcript Ollama events by
   output count, and shadows any persisted proxy event matching within **±120 s** and
   **±2 tokens** (the wider window covers bulk replay ordering).
 - Shadowed events are excluded from **every** aggregate and from the heatmap, but kept
   in the "Latest calls" log.
 
 ### 7.5 Dedup
-- Claude Code transcript events: **`message.id:requestId`**, first wins.
+- Claude Code transcript events: **`message.id:requestId`**, strongest observation wins.
 - Codex events: by source-file **byte offset**.
-- LM Studio: `"lmstudio:<ts>:<prompt>:<predicted>:<model>"`.
-- All routed through `addTranscriptEvent(_, dedupKey:)`, which checks a `seenKeys` set.
+- LM Studio: prediction id when present, else
+  `"lmstudio:<ts>:<prompt>:<predicted>:<model>"`.
+- `eventIDByDedupKey` plus `EventReconciler` upgrades an existing record in place.
 
 ### 7.6 Aggregates (computed on demand, no caches to invalidate)
 - `events(in:)` — filters to the period and **excludes shadowed**.
@@ -493,15 +526,18 @@ Exactly one copy is counted:
 - `hourlyTotals(includeCache:)` — today bucketed into 24 hour slots.
 - `heatmapDays(weeks:includeCache:)` — `weeks*7` consecutive days: live-window events
   **plus** frozen `history` for each day (using `*WithCache` when cache is on).
-- `sessionTitle(for:sample:)` — proxy → `"Ollama (direct)"`; else the transcript
+- `sessionTitle(for:sample:)` — proxy → `"Ollama (direct)"`; desktop metadata →
+  `"Ollama Desktop"`; else the transcript
   title; LM Studio → `"LM Studio · <model>"`; Codex → `"Codex · <project>"` or
   `"Codex session <id8>"`; else `"Session <id8>"`.
 - `menuTitle` — a live `↓<compact output>` if a call updated within **8 s**, else
   today's `input+output` compacted.
 
 ### 7.7 Persistence & the clock
-- `proxy-events.jsonl` — appended per finished proxy call; compacted to the retention
-  window on load. Written on a utility `ioQueue`.
+- `usage-events-v2.jsonl` — versioned shared journal for non-replayable Ollama proxy,
+  Ollama Desktop metadata, and LM Studio observations, compacted and strongest-per-key on load. If absent,
+  legacy `proxy-events.jsonl` migrates once with unknown accuracy. Written on a serial
+  utility `ioQueue`.
 - `daily-history.json` — rewritten on each fold/backfill/replay-finish.
 - The 1 Hz clock timer runs **only while `liveCalls` is non-empty**
   (`startTickingIfNeeded`) and stops itself when they drain — no idle wakeups.
@@ -587,11 +623,12 @@ Two cards, `limitRow` each:
 - **Reset countdown format** (`untilString`): `now` / `in Nm` / `in Nh Nm` / `in Nd Nh`.
 
 ### 9.4 Activity ("now") tab
-- **Live** section: either "Idle — no call in flight" (gray dot) or, per live call, a
-  spinner + model + `↑ input   ↓ output` (monospaced); plus loaded-model rows
-  (`<name> in memory · N.N GB`).
+- **Live** section: either "Idle — no call in flight" (gray dot) or, per live call,
+  provider/model/operation + `↑ input ↓ ~estimated-output`; plus loaded Ollama and LM
+  Studio models with provider and available runtime metadata.
 - **Latest calls** section: the **8** most recent **non-shadowed** events (not
-  period-scoped), each `time · brandmark · model · ↑in (+cache) ↓out`.
+  period-scoped), including operation, failed state/HTTP code, accuracy marker, and
+  available duration or throughput.
 
 ### 9.5 Usage tab
 - **Period picker** (segmented): Today / 7 Days / 30 Days. Fixed caption naming the
@@ -605,6 +642,9 @@ Two cards, `limitRow` each:
 - **Providers & models**: one `providerRow` per provider (Claude, Codex, Ollama, LM
   Studio) with `↑in (+cache) ↓out · N calls` and `· X reasoning` where present, then up
   to **5** per-model rows (`+ N more models` beyond that).
+- **Performance & reliability**: the shared `PerformanceAggregator` summarizes Ollama
+  and LM Studio with call/completion/failure/cancellation/estimated counts and medians
+  for tokens/sec, TTFT, and duration using only events that report each metric.
 - **Sessions**: an origin filter pill row (All / Claude / Codex / Ollama / LM Studio,
   `SessionOriginFilter`), then up to **6** sessions (`+ N more`). Green dot = active in
   the last **15 min**; titles are Claude Code's `/resume` names where available.
@@ -620,8 +660,8 @@ Two cards, `limitRow` each:
 Three clusters — **SOURCES**, **DISPLAY**, **NOTIFICATIONS**:
 - **Sources:** claude.ai cookie `SecureField` + Save/Disconnect; Codex method pills
   (Cookie *recommended* vs Local sessions) with the matching cookie field or status;
-  Ollama proxy status + **Copy Ollama env** (`ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN`);
-  LM Studio detected/not-detected (checks `~/.lmstudio/bin/lms`).
+  Ollama daemon + proxy-listener health and **Copy Ollama env**; LM Studio
+  install/version/telemetry/API-server health. Each states its actual coverage.
 - **Display:** *Menu bar shows* (5 checkboxes → `MenuBarItems`), *Include cached tokens
   in chart & heatmap* (`ChartIncludeCache`), *Provider colors* (7 swatches + hex field
   per provider, Reset), *Show sections* (one checkbox per collapsible section).
@@ -631,8 +671,8 @@ Three clusters — **SOURCES**, **DISPLAY**, **NOTIFICATIONS**:
 ### 9.8 Collapsible / hideable sections
 Two comma-joined `@AppStorage` string sets: `CollapsedSections` (body chevron-collapsed,
 header still shown) and `HiddenSections` (removed entirely, re-enabled from Settings).
-The six section ids (`AppSection`): `live`, `latest` (Activity); `chart`, `providers`,
-`sessions` (Usage); `heatmap` (History). The Limits header is **not** an `AppSection` —
+The seven section ids (`AppSection`): `live`, `latest` (Activity); `chart`, `providers`,
+`performance`, `sessions` (Usage); `heatmap` (History). The Limits header is **not** an `AppSection` —
 it cannot be collapsed or hidden.
 
 ### 9.9 Footer
@@ -762,12 +802,14 @@ View-bound; the rest are read directly.
 
 ## 13. Runtime files and directories
 
-- `~/Library/Application Support/TokenScope/proxy-events.jsonl` — persisted proxy
-  observations (compacted to the retention window at load; only source without an
-  on-disk transcript of record).
+- `~/Library/Application Support/TokenScope/usage-events-v2.jsonl` — versioned,
+  compacted local-event journal for Ollama proxy, Ollama Desktop metadata, and LM
+  Studio observations.
+- `~/Library/Application Support/TokenScope/proxy-events.jsonl` — legacy proxy-only
+  journal, read only for one-time migration when the v2 journal is absent.
 - `~/Library/Application Support/TokenScope/daily-history.json` — frozen per-day
   aggregates + `completeThrough` + `codexCompleteThrough`. Outlives Claude Code's
-  transcript cleanup. Delete it → one-time backfill (≤366d) on next launch.
+  transcript cleanup. If absent, it is rebuilt with a one-time backfill (≤366d).
 - `~/Library/Logs/TokenScope.log` — every lifecycle step (replay complete, proxy,
   limits, status, folds/backfills). **Not** per-event (that produced a 17 MB log). One
   file handle held open, serialized on a dedicated queue. First place to look when
@@ -782,6 +824,8 @@ View-bound; the rest are read directly.
 ```sh
 swift build -c release            # compile
 ./build-app.sh                    # bundle TokenScope.app (Info.plist + icon + ad-hoc codesign)
+
+# Framework-free domain/protocol/LM Studio regression suites: see CLAUDE.md
 ```
 
 `build-app.sh` writes the `Info.plist` (bundle id `com.tokenscope`,
@@ -830,8 +874,8 @@ data is a couple MB), 8 threads, ~7 KB log. **CPU is the metric to guard.** Do n
 - **UsageStore's clock timer runs only while calls are live** and stops itself when
   `liveCalls` empties — no idle wakeups recomputing the label.
 - **FileLog** holds one handle open and logs lifecycle only, never per-event.
-- **Poll cadence:** limits 60 s, ChatGPT limits 60 s, status 300 s, `/api/ps` 10 s,
-  transcript/codex 1 s (hot-file only), LM Studio relaunch backoff 30 s. Don't add
+- **Poll cadence:** limits 60 s, ChatGPT limits 60 s, status 300 s, Ollama health/models 10 s,
+  LM Studio health/models 30 s, transcript/codex 1 s (hot-file only), LM Studio relaunch backoff 30 s. Don't add
   per-second work.
 
 ---
@@ -849,8 +893,8 @@ the rationale lives here.
    rolling timestamp cutoff.
 3. **Shadowed events count nowhere** except the call log. Keep both runtime directions
    and the startup reconcile.
-4. **Transcript dedup = `message.id:requestId`, first wins.** Streaming rewrites repeat
-   messages.
+4. **Transcript dedup = `message.id:requestId`, strongest wins.** A final rewrite must
+   upgrade partial usage and a stale replay must not downgrade it.
 5. **Byte pre-filters before JSON decode** (`"assistant"`, `"token_count"`,
    `"session_meta"`, …) — keep them; they make the 30-day replay fast.
 6. **The proxy never rewrites response bytes**; the only mutation is forcing
@@ -872,7 +916,8 @@ the rationale lives here.
     embed, don't bundle (`Bundle.module` is unreliable headless).
 15. **`glassEffect` is banned inside the popup** — it's already system glass, and
     `ImageRenderer` renders glass as opaque white. Use `.sectionCard()` (a flat fill).
-16. **Privacy:** only ever read token counts + model id from local sources.
+16. **Privacy:** persist only operational metadata; never persist prompt/reply/tool
+    content or raw provider/CLI errors. Keep LM Studio's `--filter output` boundary.
 
 ---
 
@@ -881,10 +926,11 @@ the rationale lives here.
 - **Direct-to-Anthropic calls have no mid-call live counter** — the API reports usage
   only at completion. Live streaming numbers require routing through the proxy.
 - **Proxy events carry no session identity** — they group under "Ollama (direct)".
-- **Ollama Desktop app chats are not meterable** — the GUI talks to its own daemon
-  (bypasses the proxy) and its DB has no token counts. (Only proxied Ollama clients are
-  captured.)
-- **LM Studio history is live-only** — no backfill before first launch; a `lms`
+- **Ollama Desktop token counts are not meterable** — its DB exposes completed-call
+  metadata but no runtime token counts. TokenScope shows those calls, model, and
+  duration as `tokens unavailable`; exact counts still require the proxy.
+- **LM Studio history begins at first observation** — no backfill before first launch;
+  events persist thereafter; a `lms`
   older than v0.3.26 (no `--source model --stats`) means the provider stays off.
 - **Heatmap hue/intensity trade-off** — a heavy single-provider day and a light mixed
   day can look similar; the tooltip carries the exact split.
@@ -906,9 +952,12 @@ the rationale lives here.
 | `TranscriptWatcher.swift` | Claude Code transcript tail + session titles + backfill |
 | `CodexTranscriptWatcher.swift` | Codex session-log tail (token_count/rate_limits) + backfill |
 | `OllamaProxy.swift` | transparent TCP relay + connection handling |
-| `ResponseScanner.swift` | per-connection response parse (Ollama/Anthropic/OpenAI + regex fallback) |
-| `LMStudioLogWatcher.swift` | `lms log stream` tap |
-| `OllamaStatusPoller.swift` | `/api/ps` resident-model poll |
+| `HTTPRequestScanner.swift` / `HTTPIdentityEncodingRewriter.swift` | request attribution + split-safe identity-encoding rewrite |
+| `HTTPResponseFramer.swift` / `ResponseScanner.swift` | HTTP transport framing + Ollama/Anthropic/OpenAI/Responses usage/lifecycle parse |
+| `EventReconciler.swift` / `PerformanceAggregator.swift` | strongest-observation merge + provider-neutral operational summaries |
+| `LMStudioLogWatcher.swift` / `LMStudioEventParser.swift` | output-only model telemetry + privacy-boundary parser |
+| `LMStudioCLI.swift` / `LMStudioStatusPoller.swift` | bounded CLI execution + LM runtime/model health |
+| `OllamaStatusPoller.swift` | `/api/version` health + `/api/ps` resident-model poll |
 | `LimitsManager.swift` | claude.ai usage + the shared percent→color ramp |
 | `OpenAILimitsManager.swift` | local Codex quota (event-driven `observe`) |
 | `ChatGPTLimitsManager.swift` | ChatGPT web usage (cookie→bearer, defensive parse) |

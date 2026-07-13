@@ -30,11 +30,21 @@ final class OllamaProxy {
                         self.store.proxyStatus = "proxy :\(port) → :\(upstream)"
                         self.store.proxyHealthy = true
                     }
+                    self.store.updateRuntimeHealth(.ollama) {
+                        $0.collectorRunning = true
+                        $0.state = $0.serverRunning ? .connected : .degraded
+                        $0.lastError = nil
+                    }
                     FileLog.log("proxy listening on \(port) → \(upstream)")
                 case .failed(let err):
                     DispatchQueue.main.async {
                         self.store.proxyStatus = "proxy failed: \(err.localizedDescription)"
                         self.store.proxyHealthy = false
+                    }
+                    self.store.updateRuntimeHealth(.ollama) {
+                        $0.collectorRunning = false
+                        $0.state = .degraded
+                        $0.lastError = "proxy listener failed"
                     }
                     FileLog.log("proxy failed: \(err)")
                 default:
@@ -48,6 +58,11 @@ final class OllamaProxy {
             DispatchQueue.main.async {
                 self.store.proxyStatus = "proxy failed: \(error.localizedDescription)"
                 self.store.proxyHealthy = false
+            }
+            store.updateRuntimeHealth(.ollama) {
+                $0.collectorRunning = false
+                $0.state = .degraded
+                $0.lastError = "proxy listener failed"
             }
             FileLog.log("proxy start error: \(error)")
         }
@@ -67,6 +82,8 @@ final class Relay: Hashable {
     private let client: NWConnection
     private let upstream: NWConnection
     private let scanner: ResponseScanner
+    private let requestScanner: HTTPRequestScanner
+    private let identityRewriter = HTTPIdentityEncodingRewriter()
     private let queue = DispatchQueue(label: "tokenscope.relay")
     private var closed = false
     var onClose: ((Relay) -> Void)?
@@ -77,9 +94,13 @@ final class Relay: Hashable {
             host: NWEndpoint.Host("127.0.0.1"),
             port: NWEndpoint.Port(rawValue: upstreamPort) ?? 11434,
             using: .tcp)
-        self.scanner = ResponseScanner(
+        let responseScanner = ResponseScanner(
             onUpdate: { [weak store] st in store?.upsertLiveCall(st) },
             onFinal: { [weak store] st in store?.finishLiveCall(st) })
+        self.scanner = responseScanner
+        self.requestScanner = HTTPRequestScanner { request in
+            responseScanner.enqueueRequest(request)
+        }
     }
 
     func start() {
@@ -99,7 +120,14 @@ final class Relay: Hashable {
         client.receive(minimumIncompleteLength: 1, maximumLength: 1 << 16) { [weak self] data, _, complete, error in
             guard let self, !self.closed else { return }
             if let data, !data.isEmpty {
-                let out = Self.forceIdentityEncoding(data)
+                self.requestScanner.consume(data)
+                var out = self.identityRewriter.consume(data)
+                if complete { out.append(self.identityRewriter.flush()) }
+                if out.isEmpty {
+                    if complete { self.halfCloseUpstream() }
+                    else { self.pumpClientToUpstream() }
+                    return
+                }
                 self.upstream.send(content: out, completion: .contentProcessed { [weak self] err in
                     guard let self, !self.closed else { return }
                     if err != nil {
@@ -152,18 +180,6 @@ final class Relay: Hashable {
         client.cancel()
         upstream.cancel()
         onClose?(self)
-    }
-
-    /// Rewrites Accept-Encoding to identity inside request headers so the upstream
-    /// never gzips responses. Bodies are JSON and can't contain this header string,
-    /// so a plain text replace on the byte stream is safe.
-    private static func forceIdentityEncoding(_ data: Data) -> Data {
-        guard let s = String(data: data, encoding: .utf8), s.contains("Accept-Encoding") else { return data }
-        let replaced = s.replacingOccurrences(
-            of: "Accept-Encoding:[^\r\n]*",
-            with: "Accept-Encoding: identity",
-            options: [.regularExpression, .caseInsensitive])
-        return Data(replaced.utf8)
     }
 
     static func == (a: Relay, b: Relay) -> Bool { a === b }

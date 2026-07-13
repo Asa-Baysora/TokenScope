@@ -97,7 +97,7 @@ struct MenuView: View {
     // Limits is NOT here — it's an always-visible header (different scope/unit:
     // account-wide %, not local token counts). These are the local-token sections.
     enum AppSection: String, CaseIterable, Identifiable {
-        case live, latest, chart, providers, sessions, heatmap
+        case live, latest, chart, providers, performance, sessions, heatmap
         var id: String { rawValue }
         var title: String {
             switch self {
@@ -105,7 +105,8 @@ struct MenuView: View {
             case .latest: return "Latest calls"
             case .chart: return "Tokens over time"
             case .providers: return "Providers & models"
-            case .sessions: return "Sessions"
+            case .performance: return "Performance & reliability"
+            case .sessions: return "Sessions & activity"
             case .heatmap: return "Last 6 months"
             }
         }
@@ -447,24 +448,44 @@ struct MenuView: View {
             ForEach(store.liveCalls) { c in
                 HStack(spacing: 8) {
                     ProgressView().controlSize(.small).scaleEffect(0.65).frame(width: 12, height: 12)
-                    Text(c.model).font(.system(size: 12, weight: .medium)).lineLimit(1)
+                    BrandMarkView(origin: c.provider, size: 12)
+                    VStack(alignment: .leading, spacing: 0) {
+                        Text(c.model).font(.system(size: 12, weight: .medium)).lineLimit(1)
+                        if c.operation != .unknown {
+                            Text(operationLabel(c.operation)).font(.system(size: 9.5)).foregroundStyle(.secondary)
+                        }
+                    }
                     Spacer()
-                    Text("↑ \(Fmt.compact(c.inputTokens))   ↓ \(Fmt.compact(c.outputTokens))")
+                    Text("↑ \(Fmt.compact(c.inputTokens))   ↓ \(accuracyPrefix(c.outputAccuracy))\(Fmt.compact(c.outputTokens))")
                         .font(.system(size: 12)).monospacedDigit()
                 }
             }
-            ForEach(store.loadedModels, id: \.name) { m in
+            ForEach(store.loadedModels) { m in
                 HStack(spacing: 7) {
+                    BrandMarkView(origin: m.provider, size: 11)
                     Image(systemName: "memorychip").font(.system(size: 9)).foregroundStyle(.green)
-                    Text("\(m.name) in memory\(vram(m))")
-                        .font(.system(size: 11)).foregroundStyle(.secondary)
+                    VStack(alignment: .leading, spacing: 0) {
+                        Text(m.name).font(.system(size: 11)).lineLimit(1)
+                        Text(loadedModelDetail(m))
+                            .font(.system(size: 9.5)).foregroundStyle(.secondary).lineLimit(1)
+                    }
                 }
             }
         }
     }
 
-    private func vram(_ m: LoadedModel) -> String {
-        m.vramBytes > 0 ? String(format: " · %.1f GB", Double(m.vramBytes) / 1_000_000_000) : ""
+    private func loadedModelDetail(_ m: LoadedModel) -> String {
+        var parts = [m.provider.displayName]
+        if m.isGenerating == true { parts.append("generating") }
+        if let queued = m.queuedRequests, queued > 0 { parts.append("\(queued) queued") }
+        if m.vramBytes > 0 {
+            parts.append(String(format: "%.1f GB VRAM", Double(m.vramBytes) / 1_000_000_000))
+        } else if m.sizeBytes > 0 {
+            parts.append(String(format: "%.1f GB", Double(m.sizeBytes) / 1_000_000_000))
+        }
+        if let context = m.contextLength, context > 0 { parts.append("\(Fmt.compact(context)) ctx") }
+        if let parallel = m.parallelCapacity, parallel > 1 { parts.append("\(parallel) parallel") }
+        return parts.joined(separator: " · ")
     }
 
     @ViewBuilder private var callsContent: some View {
@@ -476,17 +497,67 @@ struct MenuView: View {
                     Text(when(e.timestamp))
                         .font(.system(size: 10.5)).foregroundStyle(.secondary).monospacedDigit()
                     BrandMarkView(origin: e.provider, size: 12)
-                    Text(e.model).font(.system(size: 11.5)).lineLimit(1)
+                    if e.status == .failed {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .font(.system(size: 9)).foregroundStyle(.orange)
+                    }
+                    VStack(alignment: .leading, spacing: 0) {
+                        Text(e.model).font(.system(size: 11.5)).lineLimit(1)
+                        if e.operation != .unknown {
+                            Text(operationLabel(e.operation)).font(.system(size: 9)).foregroundStyle(.secondary)
+                        }
+                    }
                     Spacer()
-                    Text(callDetail(e)).font(.system(size: 11)).monospacedDigit()
+                    Text(callDetail(e)).font(.system(size: 10.5)).monospacedDigit()
                 }
+                .help(callHelp(e))
             }
         }
     }
 
     private func callDetail(_ e: UsageEvent) -> String {
+        if e.status == .failed {
+            return e.httpStatus.map { "failed · \($0)" } ?? "failed"
+        }
         let cache = e.cacheReadTokens > 0 ? " +\(Fmt.compact(e.cacheReadTokens)) cache" : ""
-        return "↑ \(Fmt.compact(e.inputTokens))\(cache)  ↓ \(Fmt.compact(e.outputTokens))"
+        let performance = e.tokensPerSecond.map { String(format: " · %.1f t/s", $0) }
+            ?? e.durationSeconds.map { String(format: " · %.1fs", $0) }
+            ?? ""
+        if e.tokenAccuracy == .unknown && e.inputTokens == 0 && e.outputTokens == 0 {
+            return "tokens unavailable\(performance)"
+        }
+        return "↑ \(Fmt.compact(e.inputTokens))\(cache)  ↓ \(accuracyPrefix(e.tokenAccuracy))\(Fmt.compact(e.outputTokens))\(performance)"
+    }
+
+    private func callHelp(_ e: UsageEvent) -> String {
+        var parts = [e.provider.displayName, operationLabel(e.operation), e.status.rawValue]
+        if e.tokenAccuracy == .unknown {
+            parts.append(e.inputTokens == 0 && e.outputTokens == 0
+                         ? "token counts unavailable" : "token accuracy unknown")
+        } else {
+            parts.append(e.tokenAccuracy == .estimated ? "estimated tokens" : "\(e.tokenAccuracy.rawValue) tokens")
+        }
+        if let duration = e.durationSeconds { parts.append(String(format: "%.2fs duration", duration)) }
+        if let ttft = e.timeToFirstTokenSeconds { parts.append(String(format: "%.2fs TTFT", ttft)) }
+        if let tps = e.tokensPerSecond { parts.append(String(format: "%.1f tokens/s", tps)) }
+        if let category = e.errorCategory { parts.append(category) }
+        return parts.joined(separator: " · ")
+    }
+
+    private func accuracyPrefix(_ accuracy: MetricAccuracy) -> String {
+        accuracy == .estimated ? "~" : ""
+    }
+
+    private func operationLabel(_ operation: InferenceOperation) -> String {
+        switch operation {
+        case .chat: return "chat"
+        case .generate: return "generate"
+        case .completion: return "completion"
+        case .responses: return "responses"
+        case .embedding: return "embedding"
+        case .image: return "image"
+        case .unknown: return "inference"
+        }
     }
 
     // MARK: - Usage tab
@@ -514,8 +585,59 @@ struct MenuView: View {
                     providerBlock(.lmStudio)
                 }
             }
+            section(.performance) { performanceContent }
             section(.sessions) { sessionsContent }
-            tabEmptyNote(.usage, sections: [.chart, .providers, .sessions])
+            tabEmptyNote(.usage, sections: [.chart, .providers, .performance, .sessions])
+        }
+    }
+
+    @ViewBuilder private var performanceContent: some View {
+        let summaries = PerformanceAggregator.summarize(store.events(in: period))
+        if summaries.isEmpty {
+            emptyNote("No local-runtime performance data in this period")
+        } else {
+            VStack(alignment: .leading, spacing: 8) {
+                ForEach(summaries) { summary in performanceRow(summary) }
+                Text("Medians use only calls where the runtime reported that metric. ~ means a streamed count was estimated before final usage arrived.")
+                    .font(.system(size: 9.5)).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    private func performanceRow(_ summary: ProviderPerformanceSummary) -> some View {
+        HStack(alignment: .top, spacing: 7) {
+            BrandMarkView(origin: summary.provider, size: 14)
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 5) {
+                    Text(summary.provider.displayName).font(.system(size: 12, weight: .medium))
+                    Text("\(summary.calls) calls").font(.system(size: 10.5)).foregroundStyle(.secondary)
+                }
+                HStack(spacing: 8) {
+                    if let tps = summary.medianTokensPerSecond {
+                        Text(String(format: "%.1f tok/s median", tps))
+                    }
+                    if let ttft = summary.medianTimeToFirstTokenSeconds {
+                        Text(String(format: "%.2fs TTFT", ttft))
+                    }
+                    if let duration = summary.medianDurationSeconds {
+                        Text(String(format: "%.1fs duration", duration))
+                    }
+                }
+                .font(.system(size: 10.5)).foregroundStyle(.secondary).monospacedDigit()
+            }
+            Spacer()
+            VStack(alignment: .trailing, spacing: 1) {
+                if summary.failed > 0 {
+                    Text("\(summary.failed) failed").foregroundStyle(.orange)
+                } else {
+                    Text("\(summary.succeeded) completed").foregroundStyle(.secondary)
+                }
+                if summary.cancelled > 0 { Text("\(summary.cancelled) cancelled").foregroundStyle(.secondary) }
+                if summary.estimated > 0 { Text("\(summary.estimated) estimated").foregroundStyle(.secondary) }
+                if summary.unknownTokens > 0 { Text("\(summary.unknownTokens) tokens unavailable").foregroundStyle(.secondary) }
+            }
+            .font(.system(size: 10)).monospacedDigit()
         }
     }
 
@@ -925,15 +1047,14 @@ struct MenuView: View {
         }
     }
 
-    // One "Codex" section: pick the Cookie method (comprehensive, always current)
-    // or the Local method (this Mac's Codex sessions only). Only one is used at a
-    // time and only its card shows in the header.
+    // One Codex section: select the limits source. Local per-turn token tracking
+    // remains active with either choice.
     private var codexSourceGroup: some View {
         VStack(alignment: .leading, spacing: 8) {
             sectionTitle("Codex")
             HStack(spacing: 3) {
-                codexMethodButton("Cookie", "cookie", suffix: "· recommended")
-                codexMethodButton("Local sessions", "local", suffix: nil)
+                codexMethodButton("Cookie limits", "cookie", suffix: "· recommended")
+                codexMethodButton("Local limits", "local", suffix: nil)
             }
             if codexUsesCookie { codexCookieConfig } else { codexLocalConfig }
         }
@@ -943,12 +1064,13 @@ struct MenuView: View {
         let selected = codexUsesCookie == (value == "cookie")
         return Button {
             codexSourceRaw = value
-            // Run only the selected source; stop the other's machinery entirely.
+            // Switch only the limits source. The local Codex watcher continues
+            // collecting per-turn token telemetry in either mode.
             if value == "cookie" {
-                openAILimits.setMonitoring(false)   // stops the local watcher
+                openAILimits.setMonitoring(false)   // stops local quota observation
                 chatGPTLimits.start()               // starts the cookie poller (+refresh)
             } else {
-                openAILimits.setMonitoring(true)    // starts the local watcher
+                openAILimits.setMonitoring(true)    // starts local quota observation
                 chatGPTLimits.stop()                // stops the cookie poller
             }
         } label: {
@@ -964,8 +1086,8 @@ struct MenuView: View {
         .buttonStyle(.plain)
         .foregroundStyle(selected ? Color.accentColor : .secondary)
         .help(value == "local"
-              ? "Local only updates while Codex runs on this Mac. The Cookie method tracks your whole account and stays current across the web and other devices."
-              : "Fetches your account's usage windows via the ChatGPT cookie — comprehensive and always current. Recommended.")
+              ? "Uses quota windows emitted by Codex on this Mac. Local session token tracking stays active with either limits source."
+              : "Fetches account usage windows via the ChatGPT cookie. Local Codex session tokens are still tracked. Recommended.")
     }
 
     @ViewBuilder private var codexCookieConfig: some View {
@@ -993,6 +1115,9 @@ struct MenuView: View {
         Text("Stored locally in app preferences, sent only to chatgpt.com. Unofficial endpoint; may change.")
             .font(.system(size: 9.5)).foregroundStyle(.secondary)
             .fixedSize(horizontal: false, vertical: true)
+        Text("Local Codex session tokens continue to be tracked from ~/.codex/sessions; this choice only changes the limits source.")
+            .font(.system(size: 9.5)).foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
     }
 
     @ViewBuilder private var codexLocalConfig: some View {
@@ -1016,14 +1141,12 @@ struct MenuView: View {
 
     private var ollamaSourceGroup: some View {
         VStack(alignment: .leading, spacing: 6) {
-            sectionTitle("Ollama proxy")
-            Text("TokenScope routes Ollama (and Claude-Code-via-Ollama) traffic through a local proxy so it can meter tokens as they stream. Point clients at it with the env vars below.")
+            sectionTitle("Ollama")
+            Text("Tracks exact token usage for requests routed through TokenScope's proxy. Ollama Desktop bypasses that proxy, so TokenScope observes its completed-call metadata (model and duration) without reading message content; the app does not store token counts, so those calls are labeled unavailable.")
                 .font(.system(size: 11)).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
+            runtimeHealthRow(.ollama)
             HStack(spacing: 6) {
-                Circle().fill(store.proxyHealthy ? Color.green : Color.red).frame(width: 7, height: 7)
-                Text(store.proxyHealthy ? "Running on port \(store.proxyPort)" : "Proxy down")
-                    .font(.system(size: 11.5))
                 Spacer()
                 Button("Copy Ollama env") { copyEnv() }
                     .font(.system(size: 11))
@@ -1035,16 +1158,11 @@ struct MenuView: View {
     private var lmStudioSourceGroup: some View {
         VStack(alignment: .leading, spacing: 6) {
             sectionTitle("LM Studio")
-            Text("Meters every LM Studio inference — the app's own chats, the lms CLI, and any client pointed at the local server — via `lms log stream`. Reads only token counts, never prompts or replies.")
+            Text("Tracks completed LLM generations visible in LM Studio's shared model telemetry. Reads structured usage and timing fields only; prompts, replies, tool arguments, and raw error bodies are not retained.")
                 .font(.system(size: 11)).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
-            HStack(spacing: 6) {
-                Image(systemName: lmStudioDetected ? "checkmark.circle.fill" : "minus.circle")
-                    .foregroundStyle(lmStudioDetected ? .green : .secondary).font(.system(size: 11))
-                Text(lmStudioDetected ? "LM Studio detected" : "LM Studio not detected")
-                    .font(.system(size: 11.5))
-            }
-            if !lmStudioDetected {
+            runtimeHealthRow(.lmStudio)
+            if store.runtimeHealth[.lmStudio]?.state == .unavailable {
                 Text("Install LM Studio and its command-line tool (lms) to enable tracking.")
                     .font(.system(size: 9.5)).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -1052,9 +1170,64 @@ struct MenuView: View {
         }
     }
 
-    private var lmStudioDetected: Bool {
-        let p = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".lmstudio/bin/lms").path
-        return FileManager.default.isExecutableFile(atPath: p)
+    private func runtimeHealthRow(_ provider: UsageOrigin) -> some View {
+        let health = store.runtimeHealth[provider] ?? RuntimeHealth(provider: provider)
+        return VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 6) {
+                Circle().fill(runtimeHealthColor(health)).frame(width: 7, height: 7)
+                Text(runtimeHealthLabel(health)).font(.system(size: 11.5))
+                if let version = health.version, !version.isEmpty {
+                    Text(runtimeVersionLabel(health.provider, version))
+                        .font(.system(size: 10.5)).foregroundStyle(.secondary)
+                }
+                Spacer()
+            }
+            HStack(spacing: 5) {
+                Text("Coverage: \(health.coverage)")
+                if let last = health.lastEvent { Text("· last event \(when(last))") }
+                else if let last = health.lastSuccess { Text("· checked \(when(last))") }
+            }
+            .font(.system(size: 9.5)).foregroundStyle(.secondary)
+            if let error = health.lastError, !error.isEmpty {
+                Text(error).font(.system(size: 9.5)).foregroundStyle(.orange).lineLimit(2)
+            }
+        }
+    }
+
+    private func runtimeHealthColor(_ health: RuntimeHealth) -> Color {
+        switch health.state {
+        case .connected: return .green
+        case .installed, .connecting, .degraded: return .orange
+        case .unavailable: return .gray
+        }
+    }
+
+    private func runtimeHealthLabel(_ health: RuntimeHealth) -> String {
+        switch health.provider {
+        case .ollama:
+            if health.serverRunning && health.collectorRunning {
+                return "Daemon reachable · proxy listening on \(store.proxyPort)"
+            }
+            if health.collectorRunning { return "Proxy listening · Ollama daemon unavailable" }
+            if health.serverRunning { return "Daemon reachable · proxy unavailable" }
+        case .lmStudio:
+            if health.collectorRunning && health.serverRunning { return "Telemetry connected · API server running" }
+            if health.collectorRunning { return "Telemetry connected · API server stopped" }
+            if health.serverRunning { return "API server running · telemetry disconnected" }
+        default: break
+        }
+        switch health.state {
+        case .unavailable: return "Not available"
+        case .installed: return "Installed · not connected"
+        case .connecting: return "Connecting…"
+        case .connected: return "Connected"
+        case .degraded: return "Degraded"
+        }
+    }
+
+    private func runtimeVersionLabel(_ provider: UsageOrigin, _ version: String) -> String {
+        if provider == .lmStudio { return version }
+        return version.lowercased().hasPrefix("v") ? version : "v\(version)"
     }
 
     // MARK: Display
@@ -1199,7 +1372,7 @@ struct MenuView: View {
     private func tabFor(_ s: AppSection) -> Tab {
         switch s {
         case .live, .latest: return .now
-        case .chart, .providers, .sessions: return .usage
+        case .chart, .providers, .performance, .sessions: return .usage
         case .heatmap: return .history
         }
     }

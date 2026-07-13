@@ -16,7 +16,7 @@ final class TranscriptWatcher {
     private var backfillFrom = Date.distantPast  // history already complete through here
     private var backfilling = false
     private var backfillBatch: [String: DayAgg] = [:]
-    private var backfillSeen = Set<String>()
+    private var backfillBestByKey: [String: UsageEvent] = [:]
 
     private static let isoFrac: ISO8601DateFormatter = {
         let f = ISO8601DateFormatter()
@@ -36,9 +36,12 @@ final class TranscriptWatcher {
             self.bootstrap()
             self.scan()
             if self.backfilling {
+                for event in self.backfillBestByKey.values {
+                    self.backfillBatch[UsageStore.dayKey(event.timestamp), default: DayAgg()].add(event)
+                }
                 self.store.mergeHistorical(self.backfillBatch)
                 self.backfillBatch = [:]
-                self.backfillSeen = []
+                self.backfillBestByKey = [:]
                 self.backfilling = false
             }
             self.store.replayFinished(coverThrough: self.cutoff)
@@ -248,12 +251,17 @@ final class TranscriptWatcher {
             cacheCreationTokens: usage.cache_creation_input_tokens ?? 0,
             reasoningTokens: 0)
 
-        // Streaming writes can repeat a message across lines; first occurrence wins.
+        // Streaming writes can repeat a message across lines. Keep the strongest
+        // occurrence so a partial/zero rewrite cannot suppress finalized usage.
         let key = "\(msg.id ?? UUID().uuidString):\(line.requestId ?? "")"
         if ts >= cutoff {
             store.addTranscriptEvent(event, dedupKey: key)
-        } else if backfilling, ts >= backfillFrom, backfillSeen.insert(key).inserted {
-            backfillBatch[UsageStore.dayKey(ts), default: DayAgg()].add(event)
+        } else if backfilling, ts >= backfillFrom {
+            if let existing = backfillBestByKey[key] {
+                backfillBestByKey[key] = EventReconciler.preferred(existing, event)
+            } else {
+                backfillBestByKey[key] = event
+            }
         }
     }
 }

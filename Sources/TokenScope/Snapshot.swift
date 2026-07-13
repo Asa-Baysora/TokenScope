@@ -31,6 +31,10 @@ enum Snapshot {
                             status: services.status, openAIStatus: services.openAIStatus,
                             snapshotInline: true)
             .environment(\.colorScheme, dark ? .dark : .light)
+            // ImageRenderer otherwise emits a transparent popup; alpha compositing
+            // can make subtle primary-color cards opaque and hide their text in
+            // image viewers. A deterministic test backdrop matches the scheme.
+            .background(dark ? Color.black : Color.white)
         let renderer = ImageRenderer(content: view)
         renderer.scale = 2
         guard let img = renderer.nsImage,

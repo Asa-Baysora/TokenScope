@@ -9,6 +9,10 @@ final class UsageStore: ObservableObject {
     @Published var proxyStatus = "proxy starting…"
     @Published var proxyHealthy = false
     @Published var loadedModels: [LoadedModel] = []
+    @Published private(set) var runtimeHealth: [UsageOrigin: RuntimeHealth] = [
+        .ollama: RuntimeHealth(provider: .ollama, coverage: "routed clients"),
+        .lmStudio: RuntimeHealth(provider: .lmStudio, coverage: "completed LLM generations"),
+    ]
     @Published private(set) var history: [String: DayAgg] = [:]   // frozen days, keyed yyyy-MM-dd
     @Published private(set) var sessionNames: [String: String] = [:]   // sessionId → human title
     @Published private(set) var now = Date()
@@ -22,13 +26,14 @@ final class UsageStore: ObservableObject {
     let proxyPort: UInt16
     let upstreamPort: UInt16
 
-    private var seenKeys = Set<String>()
+    private var eventIDByDedupKey: [String: UUID] = [:]
     private var timer: Timer?
     private let ioQueue = DispatchQueue(label: "tokenscope.store-io", qos: .utility)
 
     private static let supportDir = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent("Library/Application Support/TokenScope")
     private static let proxyEventsURL = supportDir.appendingPathComponent("proxy-events.jsonl")
+    private static let localEventsURL = supportDir.appendingPathComponent("usage-events-v2.jsonl")
     private static let historyURL = supportDir.appendingPathComponent("daily-history.json")
 
     private struct HistoryFile: Codable {
@@ -63,13 +68,19 @@ final class UsageStore: ObservableObject {
         let cacheC: Int
     }
 
+    private struct PersistedLocalEvent: Codable {
+        let schema: Int
+        let key: String
+        let event: UsageEvent
+    }
+
     init() {
         let d = UserDefaults.standard
         let p = d.integer(forKey: "ProxyPort")
         let u = d.integer(forKey: "OllamaPort")
         proxyPort = p > 0 ? UInt16(p) : 11435
         upstreamPort = u > 0 ? UInt16(u) : 11434
-        loadPersistedProxyEvents()
+        loadPersistedLocalEvents()
         loadHistory()
     }
 
@@ -92,28 +103,85 @@ final class UsageStore: ObservableObject {
 
     // MARK: - Ingest
 
-    func addTranscriptEvent(_ e: UsageEvent, dedupKey: String) {
+    func updateRuntimeHealth(_ provider: UsageOrigin, _ update: @escaping (inout RuntimeHealth) -> Void) {
         DispatchQueue.main.async {
-            guard !self.seenKeys.contains(dedupKey) else { return }
-            self.seenKeys.insert(dedupKey)
-            // If the proxy already observed this same call (Claude Code routed through it),
-            // shadow the proxy copy so totals count it once.
-            if e.provider == .ollama {
-                for i in self.events.indices.reversed().prefix(60) {
-                    let p = self.events[i]
-                    if p.source == .proxy, !p.shadowed,
-                       abs(p.timestamp.timeIntervalSince(e.timestamp)) < 90,
-                       abs(p.outputTokens - e.outputTokens) <= 2 {
-                        self.events[i].shadowed = true
-                        break
-                    }
-                }
+            var health = self.runtimeHealth[provider] ?? RuntimeHealth(provider: provider)
+            update(&health)
+            self.runtimeHealth[provider] = health
+        }
+    }
+
+    func setLoadedModels(_ models: [LoadedModel], for provider: UsageOrigin) {
+        DispatchQueue.main.async {
+            let merged = self.loadedModels.filter { $0.provider != provider } + models
+            if self.loadedModels != merged { self.loadedModels = merged }
+        }
+    }
+
+    func addTranscriptEvent(_ e: UsageEvent, dedupKey: String) {
+        ingest(e, dedupKey: dedupKey, persist: false)
+    }
+
+    /// Adds an event whose provider source cannot be replayed later (proxy and
+    /// LM Studio log observations). These share one versioned journal.
+    func addLocalEvent(_ e: UsageEvent, dedupKey: String) {
+        ingest(e, dedupKey: dedupKey, persist: true)
+    }
+
+    private func ingest(_ incoming: UsageEvent, dedupKey: String, persist: Bool) {
+        DispatchQueue.main.async {
+            var event = incoming
+            if let existingID = self.eventIDByDedupKey[dedupKey],
+               let index = self.events.firstIndex(where: { $0.id == existingID }) {
+                let existing = self.events[index]
+                let preferred = EventReconciler.preferred(existing, incoming)
+                guard preferred.id != existing.id else { return }
+                event.shadowed = existing.shadowed
+                self.events[index] = event
+                self.eventIDByDedupKey[dedupKey] = event.id
+            } else {
+                self.appendEvent(event)
+                self.eventIDByDedupKey[dedupKey] = event.id
             }
-            self.appendEvent(e)
+            self.reconcileDuplicates(around: event)
             self.trim()
+            if persist { self.persistLocalEvent(event, key: dedupKey) }
             // Intentionally not logged per-event: at thousands of events/replay this
             // dominated both the log size and the write overhead. Lifecycle summaries
             // (replay complete, proxy, limits, status) are logged instead.
+        }
+    }
+
+    private func reconcileDuplicates(around event: UsageEvent) {
+        guard event.provider == .ollama else { return }
+        if (event.source == .proxy || event.source == .transcript), event.tokenAccuracy == .exact {
+            let counterpart: EventSource = event.source == .proxy ? .transcript : .proxy
+            for i in events.indices.reversed().prefix(80) {
+                let candidate = events[i]
+                guard candidate.id != event.id, candidate.source == counterpart,
+                      !candidate.shadowed, candidate.tokenAccuracy == .exact,
+                      abs(candidate.timestamp.timeIntervalSince(event.timestamp)) < 90,
+                      abs(candidate.outputTokens - event.outputTokens) <= 2 else { continue }
+                if candidate.source == .proxy {
+                    events[i].shadowed = true
+                } else if let eventIndex = events.firstIndex(where: { $0.id == event.id }) {
+                    events[eventIndex].shadowed = true
+                }
+                break
+            }
+        }
+
+        guard event.source == .proxy || event.source == .ollamaDesktop else { return }
+        for i in events.indices.reversed().prefix(80) {
+            let candidate = events[i]
+            guard candidate.id != event.id, !candidate.shadowed,
+                  EventReconciler.desktopAndProxyOverlap(candidate, event) else { continue }
+            if candidate.source == .ollamaDesktop {
+                events[i].shadowed = true
+            } else if let eventIndex = events.firstIndex(where: { $0.id == event.id }) {
+                events[eventIndex].shadowed = true
+            }
+            break
         }
     }
 
@@ -121,9 +189,12 @@ final class UsageStore: ObservableObject {
         DispatchQueue.main.async {
             let call = LiveCall(
                 id: st.id,
+                provider: .ollama,
                 model: st.model,
                 inputTokens: st.input + st.cacheRead,
                 outputTokens: st.displayOutput,
+                outputAccuracy: st.sawUsage ? .exact : (st.displayOutput > 0 ? .estimated : .unknown),
+                operation: st.operation,
                 startedAt: st.startedAt,
                 lastUpdate: Date())
             if let i = self.liveCalls.firstIndex(where: { $0.id == st.id }) {
@@ -138,9 +209,10 @@ final class UsageStore: ObservableObject {
     func finishLiveCall(_ st: ResponseScanner.CallState) {
         DispatchQueue.main.async {
             self.liveCalls.removeAll { $0.id == st.id }
-            guard st.displayOutput > 0 else { return }   // pings, count_tokens, errors
-            var e = UsageEvent(
+            guard st.displayOutput > 0 || st.input > 0 || st.status == .failed else { return }
+            let e = UsageEvent(
                 timestamp: Date(),
+                startedAt: st.startedAt,
                 provider: .ollama,
                 source: .proxy,
                 model: st.model,
@@ -150,19 +222,24 @@ final class UsageStore: ObservableObject {
                 outputTokens: st.displayOutput,
                 cacheReadTokens: st.cacheRead,
                 cacheCreationTokens: st.cacheCreate,
-                reasoningTokens: 0)
-            // Reverse of the shadowing above, in case the transcript line landed first.
-            for t in self.events.suffix(60)
-            where t.source == .transcript && t.provider == .ollama && !t.shadowed {
-                if abs(t.timestamp.timeIntervalSinceNow) < 90, abs(t.outputTokens - e.outputTokens) <= 2 {
-                    e.shadowed = true
-                    break
-                }
-            }
-            self.appendEvent(e)
-            self.trim()
-            self.persistProxyEvent(e)
-            FileLog.log("proxy \(e.model) in=\(e.inputTokens) out=\(e.outputTokens) shadowed=\(e.shadowed)")
+                reasoningTokens: st.reasoning,
+                tokenAccuracy: st.sawUsage ? .exact : (st.displayOutput > 0 ? .estimated : .unknown),
+                operation: st.operation,
+                status: st.status,
+                executionLocation: st.executionLocation,
+                endpoint: st.endpoint,
+                requestId: st.requestId,
+                httpStatus: st.httpStatus,
+                finishReason: st.finishReason,
+                errorCategory: st.errorCategory,
+                durationSeconds: st.durationSeconds,
+                loadDurationSeconds: st.loadDurationSeconds,
+                promptEvalDurationSeconds: st.promptEvalDurationSeconds,
+                evalDurationSeconds: st.evalDurationSeconds,
+                timeToFirstTokenSeconds: st.timeToFirstTokenSeconds,
+                tokensPerSecond: st.tokensPerSecond)
+            self.ingest(e, dedupKey: "proxy:\(st.id.uuidString)", persist: true)
+            FileLog.log("proxy \(e.model) in=\(e.inputTokens) out=\(e.outputTokens) accuracy=\(e.tokenAccuracy.rawValue)")
         }
     }
 
@@ -215,11 +292,13 @@ final class UsageStore: ObservableObject {
         DispatchQueue.main.async {
             self.events.sort { $0.timestamp < $1.timestamp }
             var byOut: [Int: [Date]] = [:]
-            for e in self.events where e.source == .transcript && e.provider == .ollama {
+            for e in self.events where e.source == .transcript && e.provider == .ollama
+                && e.tokenAccuracy == .exact {
                 byOut[e.outputTokens, default: []].append(e.timestamp)
             }
             var shadowed = 0
-            for i in self.events.indices where self.events[i].source == .proxy && !self.events[i].shadowed {
+            for i in self.events.indices where self.events[i].source == .proxy
+                && !self.events[i].shadowed && self.events[i].tokenAccuracy == .exact {
                 let e = self.events[i]
                 search: for delta in -2...2 {
                     if let dates = byOut[e.outputTokens + delta],
@@ -228,6 +307,17 @@ final class UsageStore: ObservableObject {
                         shadowed += 1
                         break search
                     }
+                }
+            }
+            for i in self.events.indices where self.events[i].source == .ollamaDesktop
+                && !self.events[i].shadowed {
+                let desktop = self.events[i]
+                if self.events.contains(where: {
+                    $0.source == .proxy && !$0.shadowed
+                        && EventReconciler.desktopAndProxyOverlap(desktop, $0)
+                }) {
+                    self.events[i].shadowed = true
+                    shadowed += 1
                 }
             }
             self.historyCompleteThrough = max(self.historyCompleteThrough, coverThrough)
@@ -287,7 +377,7 @@ final class UsageStore: ObservableObject {
         FileLog.log("folded \(removed.count) aged-out events into daily history")
     }
 
-    // MARK: - Persistence (proxy events only; transcripts replay from disk)
+    // MARK: - Persistence (non-replayable local events; transcripts replay from disk)
 
     private func loadHistory() {
         guard let data = try? Data(contentsOf: Self.historyURL),
@@ -311,62 +401,95 @@ final class UsageStore: ObservableObject {
         }
     }
 
-    private func loadPersistedProxyEvents() {
+    private func loadPersistedLocalEvents() {
+        if let data = try? Data(contentsOf: Self.localEventsURL), !data.isEmpty {
+            loadV2Events(data)
+            return
+        }
+        migrateLegacyProxyEvents()
+    }
+
+    private func loadV2Events(_ data: Data) {
+        let cutoff = eventsCutoff
+        let decoder = JSONDecoder()
+        var bestByKey: [String: UsageEvent] = [:]
+        var start = data.startIndex
+        while start < data.endIndex {
+            let nl = data[start...].firstIndex(of: 0x0A) ?? data.endIndex
+            let line = data[start..<nl]
+            start = nl < data.endIndex ? data.index(after: nl) : data.endIndex
+            guard !line.isEmpty,
+                  let record = try? decoder.decode(PersistedLocalEvent.self, from: line),
+                  record.schema == 2, record.event.timestamp > cutoff else { continue }
+            if let existing = bestByKey[record.key] {
+                bestByKey[record.key] = EventReconciler.preferred(existing, record.event)
+            } else {
+                bestByKey[record.key] = record.event
+            }
+        }
+        events = bestByKey.values.sorted { $0.timestamp < $1.timestamp }
+        eventIDByDedupKey = Dictionary(uniqueKeysWithValues: bestByKey.map { ($0.key, $0.value.id) })
+        rewriteLocalEventJournal(bestByKey)
+        FileLog.log("loaded \(events.count) persisted local inference events")
+    }
+
+    private func migrateLegacyProxyEvents() {
         guard let data = try? Data(contentsOf: Self.proxyEventsURL), !data.isEmpty else { return }
         let cutoff = eventsCutoff
         let decoder = JSONDecoder()
-        var loaded: [UsageEvent] = []
-        var compacted = Data()
+        var migrated: [String: UsageEvent] = [:]
         var start = data.startIndex
         while start < data.endIndex {
             let nl = data[start...].firstIndex(of: 0x0A) ?? data.endIndex
             let line = data[start..<nl]
             start = nl < data.endIndex ? data.index(after: nl) : data.endIndex
             guard !line.isEmpty, let pe = try? decoder.decode(PersistedProxyEvent.self, from: line) else { continue }
-            let ts = Date(timeIntervalSince1970: pe.ts)
-            guard ts > cutoff else { continue }
-            compacted.append(line)
-            compacted.append(0x0A)
-            loaded.append(UsageEvent(
-                timestamp: ts,
-                provider: .ollama,
-                source: .proxy,
-                model: pe.model,
-                sessionId: "ollama-direct",
-                projectName: nil,
-                inputTokens: pe.input,
-                outputTokens: pe.output,
-                cacheReadTokens: pe.cacheR,
-                cacheCreationTokens: pe.cacheC,
-                reasoningTokens: 0))
+            let timestamp = Date(timeIntervalSince1970: pe.ts)
+            guard timestamp > cutoff else { continue }
+            let event = UsageEvent(
+                timestamp: timestamp, provider: .ollama, source: .proxy,
+                model: pe.model, sessionId: "ollama-direct", projectName: nil,
+                inputTokens: pe.input, outputTokens: pe.output,
+                cacheReadTokens: pe.cacheR, cacheCreationTokens: pe.cacheC,
+                reasoningTokens: 0, tokenAccuracy: .unknown,
+                operation: .unknown, status: .succeeded,
+                executionLocation: .unknown)
+            let key = "legacy-proxy:\(pe.ts):\(pe.model):\(pe.input):\(pe.output)"
+            migrated[key] = event
         }
-        events = loaded.sorted { $0.timestamp < $1.timestamp }
-        ioQueue.async {
-            try? FileManager.default.createDirectory(at: Self.supportDir, withIntermediateDirectories: true)
-            try? compacted.write(to: Self.proxyEventsURL)
-        }
-        FileLog.log("loaded \(loaded.count) persisted proxy events")
+        events = migrated.values.sorted { $0.timestamp < $1.timestamp }
+        eventIDByDedupKey = Dictionary(uniqueKeysWithValues: migrated.map { ($0.key, $0.value.id) })
+        rewriteLocalEventJournal(migrated)
+        FileLog.log("migrated \(migrated.count) legacy proxy events to schema v2")
     }
 
-    private func persistProxyEvent(_ e: UsageEvent) {
-        let pe = PersistedProxyEvent(
-            ts: e.timestamp.timeIntervalSince1970,
-            model: e.model,
-            input: e.inputTokens,
-            output: e.outputTokens,
-            cacheR: e.cacheReadTokens,
-            cacheC: e.cacheCreationTokens)
-        guard var line = try? JSONEncoder().encode(pe) else { return }
+    private func persistLocalEvent(_ event: UsageEvent, key: String) {
+        let record = PersistedLocalEvent(schema: 2, key: key, event: event)
+        guard var line = try? JSONEncoder().encode(record) else { return }
         line.append(0x0A)
         ioQueue.async {
             try? FileManager.default.createDirectory(at: Self.supportDir, withIntermediateDirectories: true)
-            if let h = try? FileHandle(forWritingTo: Self.proxyEventsURL) {
+            if let h = try? FileHandle(forWritingTo: Self.localEventsURL) {
                 _ = try? h.seekToEnd()
                 try? h.write(contentsOf: line)
                 try? h.close()
             } else {
-                try? line.write(to: Self.proxyEventsURL)
+                try? line.write(to: Self.localEventsURL)
             }
+        }
+    }
+
+    private func rewriteLocalEventJournal(_ records: [String: UsageEvent]) {
+        let encoder = JSONEncoder()
+        var compacted = Data()
+        for (key, event) in records.sorted(by: { $0.value.timestamp < $1.value.timestamp }) {
+            guard var line = try? encoder.encode(PersistedLocalEvent(schema: 2, key: key, event: event)) else { continue }
+            line.append(0x0A)
+            compacted.append(line)
+        }
+        ioQueue.async {
+            try? FileManager.default.createDirectory(at: Self.supportDir, withIntermediateDirectories: true)
+            try? compacted.write(to: Self.localEventsURL, options: .atomic)
         }
     }
 
@@ -402,10 +525,11 @@ final class UsageStore: ObservableObject {
     func sessions(in period: StatsPeriod) -> [SessionAgg] {
         var by: [String: SessionAgg] = [:]
         for e in events(in: period) {
-            let key = e.sessionId ?? "unknown"
+            let sessionID = e.sessionId ?? "activity"
+            let key = "\(e.provider.rawValue):\(sessionID)"
             var agg = by[key] ?? SessionAgg(
                 id: key,
-                title: sessionTitle(for: key, sample: e),
+                title: sessionTitle(for: sessionID, sample: e),
                 project: e.source == .proxy ? nil : e.projectName,
                 provider: e.provider)
             agg.totals.add(e)
@@ -509,6 +633,7 @@ final class UsageStore: ObservableObject {
 
     private func sessionTitle(for key: String, sample e: UsageEvent) -> String {
         if e.source == .proxy { return "Ollama (direct)" }
+        if e.source == .ollamaDesktop { return "Ollama Desktop" }
         if let name = sessionNames[key] { return name }
         if e.provider == .lmStudio { return "LM Studio · \(e.model)" }
         if e.provider == .codex {

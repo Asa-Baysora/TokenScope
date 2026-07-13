@@ -7,7 +7,8 @@ service status.
 
 ## How it measures
 
-Token usage comes from two independent sources, reconciled automatically:
+Token usage and local-runtime activity come from four collector families,
+reconciled automatically:
 
 1. **Claude Code transcripts** (`~/.claude/projects/**/*.jsonl`). Every API response
    Claude Code receives is logged there with exact `usage` counts (input, output,
@@ -22,22 +23,33 @@ Token usage comes from two independent sources, reconciled automatically:
    and the currently observed quota windows. Prompts, replies, and tool payloads are
    never retained. It replays the live 31-day window and backfills up to a year of
    daily history once, matching Claude Code's heatmap retention. This covers local
-   Codex app/CLI sessions without a Cookie.
+   Codex app/CLI sessions whether local or cookie-based limits are selected.
 
 3. **Local Ollama proxy** (`127.0.0.1:11435 → 127.0.0.1:11434`). A transparent TCP
-   relay that parses token counts out of responses as they stream — Ollama-native,
-   OpenAI-format, and Anthropic-format alike. This is what gives you the **live,
+   relay that pairs request metadata with framed responses — Ollama-native,
+   OpenAI-compatible (including Responses and embeddings), and Anthropic-compatible.
+   It records exact final usage when the runtime reports it, marks streamed interim
+   counts as estimates, and retains status, sanitized error category, duration,
+   throughput, and TTFT when available. This is what gives you the **live,
    while-it's-generating** counter, and it captures Ollama clients that aren't
    Claude Code (`ollama run`, scripts, other apps). When the same call is seen by
    both sources (Claude Code routed through the proxy), the proxy copy is shadowed
    so totals count it once.
 
-4. **LM Studio** (`lms log stream --source model`). TokenScope taps LM Studio's
-   shared inference layer, so it meters **every** LM Studio inference — the desktop
-   app's own chats, the `lms` CLI, and any client pointed at the local server
-   (`:1234`) — each with exact token counts, whether or not the HTTP server is
-   running. It reads only the token-count stats and model id, never the prompt or
-   reply text. Requires the LM Studio command-line tool (`lms`, v0.3.26+).
+   Ollama Desktop normally bypasses the proxy. TokenScope also observes its local
+   SQLite database for completed-call metadata (model, chat identity, and timing)
+   without selecting message-content columns. Ollama Desktop does not persist the
+   runtime's token counts, so these calls appear as **tokens unavailable** rather
+   than fabricated estimates.
+
+4. **LM Studio** (`lms log stream --source model --filter output --stats --json`).
+   TokenScope records completed LLM-generation events exposed by LM Studio's shared
+   model telemetry, with exact token counts plus throughput and TTFT when present.
+   Requesting output-only events keeps formatted prompts out of TokenScope's process;
+   prompt/reply content and raw CLI errors are never retained. A low-frequency status
+   poll also reports the LM Studio version, API-server state, loaded models, context,
+   generation state, parallel capacity, and queue depth when the CLI exposes them.
+   Requires the LM Studio command-line tool (`lms`, v0.3.26+).
 
 Two more panels track things tokens alone don't tell you (features adapted from
 [ClaudeUsageBar](https://github.com/Artzainnn/ClaudeUsageBar)):
@@ -102,15 +114,16 @@ The window separates the two things it measures by **scope**:
   web + desktop + Claude Code (but not Ollama). A click away in the four tabs is
   everything denominated in **local tokens** (Claude Code + Ollama on this Mac):
 
-- **Activity** — *Live*: in-flight calls with a growing output counter (proxy
+- **Activity** — *Live*: in-flight calls with a growing, explicitly estimated output counter (proxy
   streams update live; Anthropic-format streams count chunks until the exact total
-  lands at message end), plus the Ollama model resident in memory and its VRAM.
-  *Latest calls*: the 8 most recent (time, provider dot, model,
-  `↑ input (+cache read) ↓ output`), not period-scoped.
+  lands at message end), plus loaded Ollama and LM Studio models with runtime detail.
+  *Latest calls*: the 8 most recent with operation, lifecycle/error state, accuracy,
+  token counts, and available performance detail; not period-scoped.
 - **Usage** — obeys the Today / 7 Days / 30 Days picker (with a source caption):
   the bar chart (per **hour** for Today, per **day** otherwise; future slots blank)
   with a Stacked ↔ Grouped toggle, "Hide weekends" filter, and a dashed kernel-
-  regression trendline; provider totals with per-model breakdown; sessions (green
+  regression trendline; provider totals with per-model breakdown; a shared Ollama /
+  LM Studio performance-and-reliability panel using medians; sessions (green
   dot = active in the last 15 min; named with Claude Code's own `/resume` titles).
 - **History** — GitHub-style 6-month heatmap with month labels. Cell hue marks the
   dominant local source (orange = Claude Code, purple = Codex, blue = Ollama);
@@ -121,8 +134,8 @@ The window separates the two things it measures by **scope**:
   shows** (any of session limit %, weekly limit %, daily token count); toggle
   limit/status notifications; and show/hide any section.
 
-The title-bar headline shows today's local tokens split by source (orange Claude
-Code / purple Codex / blue Ollama) rather than one merged total.
+The title-bar headline shows today's local tokens split by source rather than one
+merged total.
 
 The **footer** (always visible) shows Claude and OpenAI service status, each linked
 to its public status page. The **menu bar gauge** tints green/yellow/red to your nearest
@@ -132,7 +145,9 @@ and/or weekly limit % in Settings to show those too — each colored on the same
 green → yellow → red ramp (exact bands in
 [REFERENCE §10](docs/REFERENCE.md#10-the-menu-bar-label-and-gauge)).
 
-Proxy events persist in `~/Library/Application Support/TokenScope/proxy-events.jsonl`.
+Non-replayable Ollama proxy, Ollama Desktop metadata, and LM Studio events persist in the versioned
+`~/Library/Application Support/TokenScope/usage-events-v2.jsonl` journal. Existing
+`proxy-events.jsonl` files migrate automatically.
 
 ## Settings
 
@@ -143,12 +158,14 @@ defaults write com.tokenscope ProxyPort -int 11435
 defaults write com.tokenscope OllamaPort -int 11434
 ```
 
-Events are also appended to `~/Library/Logs/TokenScope.log` for debugging.
+Lifecycle summaries and sanitized diagnostics are appended to
+`~/Library/Logs/TokenScope.log`; prompt/reply content and raw provider errors are not.
 
 ## Notes
 
 - Retention is 31 days: transcript history is replayed from disk on every launch,
-  proxy-only events are persisted and reloaded, and anything older is dropped.
+  non-replayable Ollama/LM Studio events and Ollama Desktop metadata are persisted and reloaded, and older raw
+  events are folded into permanent daily aggregates.
 - "Native Claude" per-call usage appears when each message completes — the
   Anthropic API only reports usage in the response, so there is no mid-call
   counter for direct Anthropic traffic.

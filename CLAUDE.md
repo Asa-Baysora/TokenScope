@@ -3,9 +3,9 @@
 TokenScope is a macOS menu bar app (SwiftPM, SwiftUI `MenuBarExtra`) that meters
 local LLM token usage — live, per call, per session, per day — for Claude Code
 (native Anthropic or pointed at Ollama), Codex local sessions, any Ollama client
-routed through its local proxy, and LM Studio (via `lms log stream --source
-model`, which captures the app's own chats, the `lms` CLI, and `:1234` clients —
-counts only, never prompt/reply text). It also tracks claude.ai plan limits,
+routed through its local proxy, and completed LM Studio LLM generations (via an
+output-only `lms log stream --source model` telemetry feed — counts/stats only,
+never retained prompt/reply text). It also tracks claude.ai plan limits,
 observed Codex quota windows, experimental ChatGPT web limits, and Claude/OpenAI
 service status.
 
@@ -23,6 +23,11 @@ collapsible (persisted) and hideable from Settings.
 ```sh
 swift build -c release                       # compile
 ./build-app.sh                               # build TokenScope.app (bundle + icon)
+
+# Pure regression suites (framework-free so CommandLineTools-only Macs work):
+swiftc Sources/TokenScope/Models.swift Sources/TokenScope/EventReconciler.swift Sources/TokenScope/PerformanceAggregator.swift tools/verify-models.swift -o /tmp/tokenscope-model-checks && /tmp/tokenscope-model-checks
+swiftc Sources/TokenScope/Models.swift Sources/TokenScope/HTTPRequestScanner.swift Sources/TokenScope/HTTPIdentityEncodingRewriter.swift Sources/TokenScope/HTTPResponseFramer.swift Sources/TokenScope/ResponseScanner.swift tools/verify-protocols.swift -o /tmp/tokenscope-protocol-checks && /tmp/tokenscope-protocol-checks
+swiftc Sources/TokenScope/Models.swift Sources/TokenScope/LMStudioEventParser.swift tools/verify-lmstudio.swift -o /tmp/tokenscope-lmstudio-checks && /tmp/tokenscope-lmstudio-checks
 
 # VERIFY UI BEFORE INSTALLING — render the menu with real data:
 .build/release/TokenScope --snapshot /tmp/menu.png
@@ -55,15 +60,17 @@ reason (`MenuView(snapshotInline: true)`).
   seen twice (proxy + transcript). Live: ±90s output-token match marks the proxy
   copy `shadowed`. Startup: `replayFinished` re-reconciles persisted proxy
   events. Totals exclude shadowed events; don't count them anywhere else.
-- **Transcript dedup** is `message.id:requestId`, first occurrence wins
-  (streaming rewrites repeat messages across lines).
+- **Transcript dedup** is `message.id:requestId`; `EventReconciler` keeps the
+  strongest observation so a final rewrite upgrades a partial/zero record and a
+  later stale replay cannot downgrade it.
 - **Byte-level pre-filters** in `TranscriptWatcher.parse` (`"assistant"`,
   `"type":"summary"`, `"type":"user"` markers) keep the 30-day replay fast.
   Don't JSON-decode every line.
 - **The proxy is a transparent TCP relay.** It never rewrites response bytes;
   the only request mutation is forcing `Accept-Encoding: identity` so responses
-  stay scannable. Scanning is newline-framed (NDJSON/SSE) with a regex fallback
-  for lines split by chunked-transfer framing.
+  stay scannable. Request and response transport use bounded HTTP/1.1 framing
+  (Content-Length, chunked, keep-alive, close-delimited); NDJSON/SSE body records
+  are parsed only after transfer framing is removed.
 - Claude Code transcript classification is `model.hasPrefix("claude")` →
   `claudeCode`, else `ollama`; Codex comes only from its explicit local watcher.
   Transcript `model == "<synthetic>"` lines are skipped.
@@ -131,20 +138,24 @@ Idle CPU must stay near zero. Measured regressions that were fixed; don't undo:
   stopping itself when `liveCalls` empties — no idle wakeups recomputing the label.
 - **FileLog holds one file handle open** and does NOT log per-event (per-event at
   replay scale produced a 17 MB / 178k-line log). Lifecycle summaries only.
-- Pollers: limits 5 min, status 5 min, `/api/ps` 10 s. Don't add per-second work.
+- Pollers: limits/status 5 min, Ollama health + `/api/ps` 10 s, LM Studio status +
+  loaded models 30 s. Ollama Desktop DB/WAL observation is vnode-driven and debounced.
+  Don't add per-second work.
 
 ## Runtime files
 
-- `~/Library/Application Support/TokenScope/proxy-events.jsonl` — persisted
-  proxy observations (compacted to 31 days at load).
+- `~/Library/Application Support/TokenScope/usage-events-v2.jsonl` — versioned,
+  compacted journal for non-replayable Ollama proxy, Ollama Desktop metadata, and LM
+  Studio observations.
+  A legacy `proxy-events.jsonl` is migrated once when the v2 journal is absent.
 - `~/Library/Application Support/TokenScope/daily-history.json` — frozen per-day
   aggregates + `completeThrough`; outlives Claude Code's transcript cleanup.
-  Deleting it triggers a fresh one-time backfill (≤366 days) on next launch.
+  If absent, it is rebuilt with a one-time backfill (≤366 days) on next launch.
 - Codex raw session logs remain in `~/.codex/sessions/**/*.jsonl`; TokenScope
   reads only `session_meta` and `token_count` records, then retains the same
   31-day event window and permanent day aggregates as other local sources. Its
   own persisted watermark drives the one-time ≤366-day history backfill.
-- `~/Library/Logs/TokenScope.log` — every ingested event and lifecycle step;
-  first place to look when verifying behavior.
+- `~/Library/Logs/TokenScope.log` — lifecycle summaries and sanitized diagnostics;
+  first place to look when verifying behavior. Per-event logging is deliberately off.
 - Ports via `defaults write com.tokenscope ProxyPort|OllamaPort -int N`
   (defaults 11435 → 11434).

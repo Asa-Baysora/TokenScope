@@ -8,8 +8,10 @@ final class AppServices {
     let watcher: TranscriptWatcher
     let codexWatcher: CodexTranscriptWatcher
     let proxy: OllamaProxy
+    let ollamaDesktop: OllamaDesktopWatcher
     let ollamaStatus: OllamaStatusPoller
     let lmStudio: LMStudioLogWatcher
+    let lmStudioStatus: LMStudioStatusPoller
     let limits: LimitsManager
     let openAILimits: OpenAILimitsManager
     let chatGPTLimits: ChatGPTLimitsManager
@@ -25,17 +27,18 @@ final class AppServices {
         openAILimits = OpenAILimitsManager()
         codexWatcher = CodexTranscriptWatcher(store: s, limits: openAILimits)
         proxy = OllamaProxy(store: s)
+        ollamaDesktop = OllamaDesktopWatcher(store: s)
         ollamaStatus = OllamaStatusPoller(store: s)
         lmStudio = LMStudioLogWatcher(store: s)
+        lmStudioStatus = LMStudioStatusPoller(store: s)
         limits = LimitsManager()
         chatGPTLimits = ChatGPTLimitsManager()
         status = StatusManager()
         openAIStatus = StatusManager(service: .openAI)
         appearance = AppearanceWatcher()
         Notifier.requestAuthorization()
-        // Codex has one active source. Default the choice (cookie if one is already
-        // connected, else local), then start ONLY that source so the other's
-        // machinery doesn't run in the background.
+        // Codex has one active limits source. Local session token tracking always
+        // remains active because cookie limits do not contain per-turn usage.
         let defaults = UserDefaults.standard
         if defaults.string(forKey: "CodexSource") == nil {
             defaults.set(chatGPTLimits.connected ? "cookie" : "local", forKey: "CodexSource")
@@ -43,10 +46,12 @@ final class AppServices {
         let codexCookie = defaults.string(forKey: "CodexSource") == "cookie"
         openAILimits.monitoringEnabled = !codexCookie
         watcher.start()
-        codexWatcher.start()              // registers observers; scans only if local is active
+        codexWatcher.start()              // always tracks local tokens; quota observation is selectable
         proxy.start()
+        ollamaDesktop.start()
         ollamaStatus.start()
         lmStudio.start()                  // taps `lms log stream`; no-ops if LM Studio/CLI absent
+        lmStudioStatus.start()
         limits.start()
         if codexCookie { chatGPTLimits.start() }   // poll only when cookie is the source
         status.start()
