@@ -5,8 +5,7 @@
 > *without reading the Swift source*. Where a fact is load-bearing, the file and the
 > exact value are named so you can jump to it.
 >
-> **Reflects:** v0.1.2 (`CFBundleVersion` 3) plus the local-runtime parity work in
-> this working tree, 2026-07-13.
+> **Reflects:** v0.1.3 (`CFBundleVersion` 4), 2026-07-14.
 > When you change behavior, update this file in the same commit.
 >
 > **Companion docs:** `CLAUDE.md` is the always-loaded working checklist for coding
@@ -76,6 +75,7 @@ source**, and the UI is deliberately split along that seam:
 | Codex app / CLI (local) | ✅ exact | Codex session-log tail | `token_count.last_token_usage` |
 | Ollama via proxy (`ollama run`, scripts, any client → :11435) | ✅ exact + **live** | TCP relay + response scan | `eval_count` / `prompt_eval_count` |
 | Ollama Desktop app's own chats | ✅ activity; tokens unavailable | metadata-only SQLite watcher | model/chat/timestamps; DB has no runtime token counts |
+| Ollama Desktop chats with the opt-in GUI routing (§6.3) | ✅ exact + **live** | GUI → existing proxy via `OLLAMA_HOST` | same `eval_count` fields; metadata rows auto-shadowed |
 | LM Studio completed LLM generations visible in shared model telemetry | ✅ exact | output-only `lms log stream` tap | `stats.{promptTokensCount, predictedTokensCount}` |
 | claude.ai web / Claude desktop | limits-only | claude.ai usage endpoint | utilization %, not tokens |
 | ChatGPT web / desktop | limits-only (experimental) | ChatGPT usage endpoint | utilization %, not tokens |
@@ -331,6 +331,20 @@ how it feeds the store → privacy → limitations.** Source file named in the h
   to the DB metadata.
 - **Deduplication:** if a matching model/start/end/duration proxy observation exists,
   the metadata-only desktop record is shadowed and the proxy's stronger evidence wins.
+
+**Opt-in exact GUI metering (verified live 2026-07-13, Ollama app 0.31.2–0.32.0):**
+the Desktop app's GUI never talks to the daemon directly — its UI server
+reverse-proxies to `envconfig.ConnectableHost()`, i.e. **the `OLLAMA_HOST` the app
+process sees** (`app/ui/ui.go`). The daemon's env is built by the app, and
+`OLLAMA_HOST` is overridden to `0.0.0.0` (→ port 11434) **only when Ollama's
+"Expose to network" setting is on** (`app/server/server.go`). So with Expose ON:
+`launchctl setenv OLLAMA_HOST 127.0.0.1:11435` + app restart splits the two — daemon
+stays on 11434, **GUI chats route through TokenScope's existing proxy** with exact
+counts, and the SQLite metadata rows shadow automatically. Constraints: `launchctl
+setenv` is session-scoped (gone after reboot); while set, the GUI needs TokenScope
+running (revert: `launchctl unsetenv OLLAMA_HOST` + reopen Ollama); survives Ollama
+auto-updates (observed across 0.31.2 → 0.32.0). Not yet productized — a Settings
+toggle + login-persistent setup is the planned feature pass.
 
 ### 6.4 LM Studio — `LMStudioLogWatcher.swift`
 

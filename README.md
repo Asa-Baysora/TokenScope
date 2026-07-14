@@ -42,6 +42,21 @@ reconciled automatically:
    runtime's token counts, so these calls appear as **tokens unavailable** rather
    than fabricated estimates.
 
+   **Optional: exact token counts for Ollama Desktop's own chats.** The Desktop
+   app's GUI connects to its daemon through a target it reads from `OLLAMA_HOST`,
+   so with **Settings → Expose Ollama to the network enabled in Ollama** (which
+   pins its daemon to port 11434) you can route the GUI through TokenScope:
+
+   ```sh
+   launchctl setenv OLLAMA_HOST 127.0.0.1:11435   # then quit & reopen Ollama
+   ```
+
+   GUI chats then stream through the proxy with exact counts, and the metadata
+   observations above are automatically de-duplicated against them. Two caveats:
+   `launchctl setenv` does not survive a reboot (re-run it, or add a login item),
+   and **while it is set, Ollama's GUI needs TokenScope running** — if TokenScope
+   is off, undo with `launchctl unsetenv OLLAMA_HOST` and reopen Ollama.
+
 4. **LM Studio** (`lms log stream --source model --filter output --stats --json`).
    TokenScope records completed LLM-generation events exposed by LM Studio's shared
    model telemetry, with exact token counts plus throughput and TTFT when present.
