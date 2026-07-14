@@ -726,6 +726,7 @@ struct MenuView: View {
                     .frame(height: barHeight)
                     .allowsHitTesting(false)
             }
+            .padding(.top, 4)   // keep the tallest bar clear of the header pills
             HStack {
                 Text(leadingEdgeLabel(bars)).font(.system(size: 9)).foregroundStyle(.secondary)
                 Spacer()
@@ -756,23 +757,31 @@ struct MenuView: View {
     // read at equal weight. Colors come from the palette (single source of truth).
     private func barColor(_ o: UsageOrigin) -> Color { palette.color(o).opacity(0.9) }
 
+    /// Segment heights: proportional with a 1.5pt visibility floor for every
+    /// non-zero provider — but the floor's inflation is taken back out of the
+    /// largest segment so the whole bar (plus its inter-segment spacing) can
+    /// NEVER exceed the lane. Without the cap, a max-height day with all four
+    /// providers drew ~47pt in a 42pt lane and rose into the header pills.
+    private func stackedSegments(_ d: DayStat, maxV: Int, height: CGFloat) -> [(origin: UsageOrigin, height: CGFloat)] {
+        let values: [(UsageOrigin, Int)] = [
+            (.lmStudio, d.lmStudio), (.ollama, d.ollama),
+            (.codex, d.codex), (.claudeCode, d.claude),
+        ].filter { $0.1 > 0 }
+        guard !values.isEmpty else { return [] }
+        var heights = values.map { max(height * CGFloat($0.1) / CGFloat(maxV), 1.5) }
+        let spacing = CGFloat(values.count - 1)   // VStack(spacing: 1)
+        let excess = heights.reduce(0, +) + spacing - height
+        if excess > 0, let tallest = heights.indices.max(by: { heights[$0] < heights[$1] }) {
+            heights[tallest] = max(heights[tallest] - excess, 1.5)
+        }
+        return zip(values, heights).map { (origin: $0.0, height: $1) }
+    }
+
     private func stackedBar(_ d: DayStat, maxV: Int, height: CGFloat) -> some View {
         VStack(spacing: 1) {
-            if d.lmStudio > 0 {
-                RoundedRectangle(cornerRadius: 1).fill(barColor(.lmStudio))
-                    .frame(height: max(height * CGFloat(d.lmStudio) / CGFloat(maxV), 1.5))
-            }
-            if d.ollama > 0 {
-                RoundedRectangle(cornerRadius: 1).fill(barColor(.ollama))
-                    .frame(height: max(height * CGFloat(d.ollama) / CGFloat(maxV), 1.5))
-            }
-            if d.codex > 0 {
-                RoundedRectangle(cornerRadius: 1).fill(barColor(.codex))
-                    .frame(height: max(height * CGFloat(d.codex) / CGFloat(maxV), 1.5))
-            }
-            if d.claude > 0 {
-                RoundedRectangle(cornerRadius: 1).fill(barColor(.claudeCode))
-                    .frame(height: max(height * CGFloat(d.claude) / CGFloat(maxV), 1.5))
+            ForEach(stackedSegments(d, maxV: maxV, height: height), id: \.origin) { segment in
+                RoundedRectangle(cornerRadius: 1).fill(barColor(segment.origin))
+                    .frame(height: segment.height)
             }
             if d.total == 0 {
                 RoundedRectangle(cornerRadius: 1).fill(Color.gray.opacity(0.15)).frame(height: 1.5)
