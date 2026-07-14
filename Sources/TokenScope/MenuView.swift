@@ -614,14 +614,16 @@ struct MenuView: View {
                     Text("\(summary.calls) calls").font(.system(size: 10.5)).foregroundStyle(.secondary)
                 }
                 HStack(spacing: 8) {
+                    // fixedSize per metric: without it a tight row wraps
+                    // mid-unit ("tok/ s median") instead of overflowing cleanly.
                     if let tps = summary.medianTokensPerSecond {
-                        Text(String(format: "%.1f tok/s median", tps))
+                        Text(String(format: "%.1f tok/s median", tps)).fixedSize()
                     }
                     if let ttft = summary.medianTimeToFirstTokenSeconds {
-                        Text(String(format: "%.2fs TTFT", ttft))
+                        Text(String(format: "%.2fs TTFT", ttft)).fixedSize()
                     }
                     if let duration = summary.medianDurationSeconds {
-                        Text(String(format: "%.1fs duration", duration))
+                        Text(String(format: "%.1fs duration", duration)).fixedSize()
                     }
                 }
                 .font(.system(size: 10.5)).foregroundStyle(.secondary).monospacedDigit()
@@ -639,6 +641,23 @@ struct MenuView: View {
             }
             .font(.system(size: 10)).monospacedDigit()
         }
+    }
+
+    /// Compact toggle/choice pill for the chart header — mirrors the session
+    /// filter's styling so the Usage tab reads as one system.
+    private func chartPill(_ label: String, selected: Bool, help: String,
+                           action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(label).font(.system(size: 10, weight: selected ? .semibold : .regular))
+                .padding(.horizontal, 7).padding(.vertical, 3)
+                .background(RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(selected ? Color.accentColor.opacity(0.18) : Color.primary.opacity(0.05)))
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(selected ? Color.accentColor : .secondary)
+        .fixedSize()
+        .help(help)
     }
 
     private var chartBlock: some View {
@@ -665,16 +684,26 @@ struct MenuView: View {
                         ? "Bars include prompt-cache reads and writes — the context each call actually processed. Turn off in Settings."
                         : "Bars show fresh input + output only (cache excluded). Turn on in Settings.")
                 Spacer()
+                // Plain-SwiftUI pills, NOT a segmented Picker or checkbox Toggle:
+                // the AppKit-backed mini controls misreport their intrinsic width
+                // in the MenuBarExtra popup and drew over each other ("Hide
+                // weekends" under "Stacked") — and they render as placeholders in
+                // snapshots, which is how the overlap escaped review. Same pill
+                // pattern as the tab bar and session filter.
                 if period != .today {
-                    Toggle("Hide weekends", isOn: $hideWeekends)
-                        .toggleStyle(.checkbox).controlSize(.mini)
-                        .font(.system(size: 10)).foregroundStyle(.secondary)
+                    chartPill("Hide weekends", selected: hideWeekends,
+                              help: "Drop Saturdays and Sundays from the chart") {
+                        hideWeekends.toggle()
+                    }
                 }
-                Picker("", selection: $barStyleRaw) {
-                    Text("Stacked").tag("stacked")
-                    Text("Grouped").tag("grouped")
+                chartPill("Stacked", selected: barStyleRaw == "stacked",
+                          help: "One bar per slot, providers stacked") {
+                    barStyleRaw = "stacked"
                 }
-                .pickerStyle(.segmented).labelsHidden().controlSize(.mini).fixedSize()
+                chartPill("Grouped", selected: barStyleRaw == "grouped",
+                          help: "Side-by-side mini-bars per provider") {
+                    barStyleRaw = "grouped"
+                }
             }
             ZStack(alignment: .bottom) {
                 HStack(alignment: .bottom, spacing: spacing) {

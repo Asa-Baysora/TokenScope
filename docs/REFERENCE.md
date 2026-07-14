@@ -648,8 +648,11 @@ Two cards, `limitRow` each:
 - **Period picker** (segmented): Today / 7 Days / 30 Days. Fixed caption naming the
   four local providers and the exclusions.
 - **Tokens over time** (chart): per-**hour** for Today, per-**day** otherwise; future
-  slots blank. **Stacked ↔ Grouped** toggle (`BarChartStyle`); **Hide weekends**
-  (daily views only, `HideWeekends`); a dashed **kernel-regression trendline**
+  slots blank. Header controls are **plain-SwiftUI pills** (`chartPill`), not a
+  segmented Picker/checkbox — the AppKit-backed mini controls misreport their
+  intrinsic width in the popup and drew over each other, and they were invisible
+  in snapshots. **Stacked ↔ Grouped** pills (`BarChartStyle`); **Hide weekends**
+  pill (daily views only, `HideWeekends`); a dashed **kernel-regression trendline**
   (Gaussian Nadaraya–Watson, bandwidth `max(1.25, n/6)`, drawn when ≥3 points).
   Stacked order bottom→top: lmStudio, ollama, codex, claude. Per-bar `.help` tooltip
   gives the exact split. `· incl. cache` appears when `ChartIncludeCache` is on.
