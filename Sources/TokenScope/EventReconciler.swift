@@ -16,12 +16,22 @@ enum EventReconciler {
     static func desktopAndProxyOverlap(_ a: UsageEvent, _ b: UsageEvent) -> Bool {
         guard a.provider == .ollama, b.provider == .ollama,
               Set([a.source, b.source]) == Set([.ollamaDesktop, .proxy]),
-              a.model == b.model,
               abs(a.timestamp.timeIntervalSince(b.timestamp)) < 4 else { return false }
-        if let aStart = a.startedAt, let bStart = b.startedAt,
-           abs(aStart.timeIntervalSince(bStart)) >= 4 { return false }
-        if let aDuration = a.durationSeconds, let bDuration = b.durationSeconds,
-           abs(aDuration - bDuration) >= 4 { return false }
+        // The Desktop DB's model_name can be empty (unknown ≠ different) — let
+        // only the DESKTOP side wildcard; a proxy event always names its model
+        // from the request.
+        let desktop = a.source == .ollamaDesktop ? a : b
+        let proxy = a.source == .proxy ? a : b
+        guard a.model == b.model || desktop.model.isEmpty else { return false }
+        // Completion times (the <4s gate above) are the strong anchor — both
+        // sides stamp within a second of stream end. Starts are NOT symmetric:
+        // the app inserts the DB row only after prompt evaluation, so the row's
+        // start lags the HTTP request start by an unbounded prompt-eval time
+        // (measured 5s on a small chat; grows with context). Require containment
+        // — the row must not START before the request did — instead of equal
+        // starts, and drop the duration gate (implied by the two anchors).
+        if let dStart = desktop.startedAt, let pStart = proxy.startedAt,
+           dStart.timeIntervalSince(pStart) < -4 { return false }
         return true
     }
 

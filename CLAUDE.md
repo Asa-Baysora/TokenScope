@@ -25,7 +25,7 @@ swift build -c release                       # compile
 ./build-app.sh                               # build TokenScope.app (bundle + icon)
 
 # Pure regression suites (framework-free so CommandLineTools-only Macs work):
-swiftc Sources/TokenScope/Models.swift Sources/TokenScope/EventReconciler.swift Sources/TokenScope/PerformanceAggregator.swift tools/verify-models.swift -o /tmp/tokenscope-model-checks && /tmp/tokenscope-model-checks
+swiftc Sources/TokenScope/Models.swift Sources/TokenScope/EventReconciler.swift Sources/TokenScope/PerformanceAggregator.swift Sources/TokenScope/ProcessReaper.swift Sources/TokenScope/Fmt.swift tools/verify-models.swift -o /tmp/tokenscope-model-checks && /tmp/tokenscope-model-checks
 swiftc Sources/TokenScope/Models.swift Sources/TokenScope/HTTPRequestScanner.swift Sources/TokenScope/HTTPIdentityEncodingRewriter.swift Sources/TokenScope/HTTPResponseFramer.swift Sources/TokenScope/ResponseScanner.swift tools/verify-protocols.swift -o /tmp/tokenscope-protocol-checks && /tmp/tokenscope-protocol-checks
 swiftc Sources/TokenScope/Models.swift Sources/TokenScope/LMStudioEventParser.swift tools/verify-lmstudio.swift -o /tmp/tokenscope-lmstudio-checks && /tmp/tokenscope-lmstudio-checks
 
@@ -141,6 +141,25 @@ Idle CPU must stay near zero. Measured regressions that were fixed; don't undo:
 - Pollers: limits/status 5 min, Ollama health + `/api/ps` 10 s, LM Studio status +
   loaded models 30 s. Ollama Desktop DB/WAL observation is vnode-driven and debounced.
   Don't add per-second work.
+- **Publish only on significant change.** `updateRuntimeHealth` gates on
+  `RuntimeHealth.significantlyDiffers` (excludes the `lastSuccess`/`lastEvent`
+  heartbeats — kept in a non-published pulse map, overlaid by the computed
+  `runtimeHealth`); `setLoadedModels` gates on `LoadedModel.displayEquals`
+  (excludes Ollama's `expiresAt` countdown). Unconditional publishing re-rendered
+  the scene — incl. the ImageRenderer menu-bar bitmap — every 10 s poll and took
+  idle CPU from ~0.2% to ~2%. If a new poller stamps timestamps, keep them out of
+  the published comparison.
+- **Never leak the `lms log stream` child.** Three layers, all required: headless
+  paths (`--snapshot`/`--menubar`/`--gauges`) never start the LM Studio services
+  (side effect: LM Studio's Settings row shows its not-started default in
+  snapshots — that's expected, not a bug); the app terminates the child in
+  `applicationWillTerminate` AND via a SIGTERM DispatchSource (`pkill -x
+  TokenScope` is our own install flow); `ProcessReaper` runs once at startup and
+  kills launchd-adopted (`ppid == 1`) strays matching the stream argv — this
+  covers SIGKILL/crash. Before these, 28 orphans (~1.6 GB) had accumulated.
+- LM Studio spawns are **skipped while the app isn't running**
+  (`LMStudioCLI.appIsRunning`, bundle id ai.elementlabs.lmstudio) — the 30 s
+  retry cadence itself never stops, so a renamed bundle id degrades gracefully.
 
 ## Runtime files
 

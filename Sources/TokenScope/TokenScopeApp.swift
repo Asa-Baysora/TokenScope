@@ -50,8 +50,16 @@ final class AppServices {
         proxy.start()
         ollamaDesktop.start()
         ollamaStatus.start()
-        lmStudio.start()                  // taps `lms log stream`; no-ops if LM Studio/CLI absent
-        lmStudioStatus.start()
+        // Headless one-shot paths (--snapshot/--menubar/--gauges) exit(0) without
+        // any teardown; spawning `lms log stream` there orphaned one child per
+        // run (28 strays ≈ 1.6 GB observed). Only the real app spawns — and it
+        // first reaps strays left by crashed/killed predecessors.
+        let headless = CommandLine.arguments.contains { ["--snapshot", "--menubar", "--gauges"].contains($0) }
+        if !headless {
+            ProcessReaper.reapStaleLMStudioLogStreams()
+            lmStudio.start()              // taps `lms log stream`; no-ops if LM Studio/CLI absent
+            lmStudioStatus.start()
+        }
         limits.start()
         if codexCookie { chatGPTLimits.start() }   // poll only when cookie is the source
         status.start()
@@ -61,8 +69,27 @@ final class AppServices {
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    // Held so the SIGTERM source stays armed for the app's lifetime.
+    private var sigtermSource: DispatchSourceSignal?
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
+        // `pkill -x TokenScope` / `kill <pid>` deliver SIGTERM without running
+        // applicationWillTerminate — and our own install flow uses pkill. Catch
+        // it so the `lms log stream` child never outlives the app. (SIGKILL is
+        // unobservable; the startup reaper covers that path on next launch.)
+        signal(SIGTERM, SIG_IGN)
+        let source = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
+        source.setEventHandler {
+            AppServices.shared.lmStudio.stopAndWait()
+            exit(0)
+        }
+        source.resume()
+        sigtermSource = source
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        AppServices.shared.lmStudio.stopAndWait()
     }
 }
 

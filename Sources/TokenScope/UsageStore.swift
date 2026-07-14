@@ -9,10 +9,26 @@ final class UsageStore: ObservableObject {
     @Published var proxyStatus = "proxy starting…"
     @Published var proxyHealthy = false
     @Published var loadedModels: [LoadedModel] = []
-    @Published private(set) var runtimeHealth: [UsageOrigin: RuntimeHealth] = [
+    // Published only on significant change (see RuntimeHealth.significantlyDiffers).
+    // The volatile lastSuccess/lastEvent heartbeats live in `runtimeHealthPulse`
+    // and are overlaid by the computed `runtimeHealth` at read time — publishing
+    // them re-rendered the scene (and the menu-bar bitmap) on every 10s poll.
+    @Published private var runtimeHealthState: [UsageOrigin: RuntimeHealth] = [
         .ollama: RuntimeHealth(provider: .ollama, coverage: "routed clients"),
         .lmStudio: RuntimeHealth(provider: .lmStudio, coverage: "completed LLM generations"),
     ]
+    private var runtimeHealthPulse: [UsageOrigin: (lastSuccess: Date?, lastEvent: Date?)] = [:]
+
+    var runtimeHealth: [UsageOrigin: RuntimeHealth] {
+        runtimeHealthState.mapValues { health in
+            var merged = health
+            if let pulse = runtimeHealthPulse[health.provider] {
+                merged.lastSuccess = pulse.lastSuccess ?? merged.lastSuccess
+                merged.lastEvent = pulse.lastEvent ?? merged.lastEvent
+            }
+            return merged
+        }
+    }
     @Published private(set) var history: [String: DayAgg] = [:]   // frozen days, keyed yyyy-MM-dd
     @Published private(set) var sessionNames: [String: String] = [:]   // sessionId → human title
     @Published private(set) var now = Date()
@@ -105,16 +121,28 @@ final class UsageStore: ObservableObject {
 
     func updateRuntimeHealth(_ provider: UsageOrigin, _ update: @escaping (inout RuntimeHealth) -> Void) {
         DispatchQueue.main.async {
+            // Base on the merged view so update closures see current heartbeats.
             var health = self.runtimeHealth[provider] ?? RuntimeHealth(provider: provider)
             update(&health)
-            self.runtimeHealth[provider] = health
+            // Heartbeats always land in the (non-published) pulse map…
+            self.runtimeHealthPulse[provider] = (health.lastSuccess, health.lastEvent)
+            // …but the published state only changes when something the UI keys
+            // its structure/colors off actually differs.
+            let previous = self.runtimeHealthState[provider] ?? RuntimeHealth(provider: provider)
+            if previous.significantlyDiffers(from: health) {
+                self.runtimeHealthState[provider] = health
+            }
         }
     }
 
     func setLoadedModels(_ models: [LoadedModel], for provider: UsageOrigin) {
         DispatchQueue.main.async {
             let merged = self.loadedModels.filter { $0.provider != provider } + models
-            if self.loadedModels != merged { self.loadedModels = merged }
+            // displayEquals ignores expiresAt — Ollama's keep-alive countdown
+            // changes every poll and would republish (and re-render) every 10s.
+            let unchanged = merged.count == self.loadedModels.count
+                && zip(merged, self.loadedModels).allSatisfy { $0.displayEquals($1) }
+            if !unchanged { self.loadedModels = merged }
         }
     }
 

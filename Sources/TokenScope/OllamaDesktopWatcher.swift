@@ -15,6 +15,10 @@ final class OllamaDesktopWatcher {
     private var db: OpaquePointer?
     private var lastSeenID: Int64 = 0
     private var pending: Set<Int64> = []
+    // A streaming row deleted before completing would sit in `pending` forever,
+    // costing one SQL probe per scan. Two consecutive not-found scans distinguish
+    // a genuine delete from a transient WAL-visibility miss.
+    private var pendingMisses: [Int64: Int] = [:]
     private var scanGeneration = 0
 
     init(store: UsageStore) { self.store = store }
@@ -131,20 +135,30 @@ final class OllamaDesktopWatcher {
             else { self.emit(row) }
         }
 
-        var completedPending: [Int64] = []
+        var resolvedPending: [Int64] = []
         for id in pending {
+            var found = false
             query("""
                 SELECT id, chat_id, COALESCE(model_name, ''), created_at, updated_at, stream
                 FROM messages WHERE id = \(id) AND role='assistant'
                 """, db: db) { statement in
+                found = true
                 let row = self.row(statement)
                 if !row.streaming {
-                    completedPending.append(id)
+                    resolvedPending.append(id)
                     self.emit(row)
                 }
             }
+            if found {
+                pendingMisses[id] = nil
+            } else {
+                let misses = (pendingMisses[id] ?? 0) + 1
+                pendingMisses[id] = misses
+                if misses >= 2 { resolvedPending.append(id) }   // deleted mid-stream; nothing to emit
+            }
         }
-        pending.subtract(completedPending)
+        pending.subtract(resolvedPending)
+        for id in resolvedPending { pendingMisses[id] = nil }
     }
 
     private struct Row {

@@ -1,4 +1,5 @@
 import Foundation
+import AppKit
 
 enum LMStudioCLI {
     static let candidates = [
@@ -9,6 +10,16 @@ enum LMStudioCLI {
 
     static var path: String? {
         candidates.first { FileManager.default.isExecutableFile(atPath: $0) }
+    }
+
+    /// Cheap, subprocess-free "is the LM Studio app running" check (verified
+    /// bundle id: ai.elementlabs.lmstudio). Used ONLY as an optimization to
+    /// skip pointless `lms` spawns while the app is closed — callers must keep
+    /// their normal retry path so a renamed bundle id can never dead-end them.
+    static var appIsRunning: Bool {
+        NSWorkspace.shared.runningApplications.contains {
+            $0.bundleIdentifier == "ai.elementlabs.lmstudio"
+        }
     }
 
     struct Output {

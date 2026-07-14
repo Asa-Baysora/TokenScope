@@ -14,18 +14,36 @@ final class LMStudioStatusPoller {
     func start() {
         let timer = DispatchSource.makeTimerSource(queue: queue)
         timer.schedule(deadline: .now() + 5, repeating: 30)
-        timer.setEventHandler { [weak self] in self?.poll() }
+        // The workspace check runs on main (AppKit), the CLI work on our queue —
+        // async hops only. When the app is closed we skip both `lms` spawns
+        // (2 per 30s, permanently, for nothing) and publish the state directly.
+        timer.setEventHandler { [weak self] in
+            DispatchQueue.main.async {
+                let appRunning = LMStudioCLI.appIsRunning
+                self?.queue.async { self?.poll(appRunning: appRunning) }
+            }
+        }
         timer.resume()
         self.timer = timer
     }
 
-    private func poll() {
+    private func poll(appRunning: Bool) {
         guard LMStudioCLI.path != nil else {
             store.updateRuntimeHealth(.lmStudio) {
                 $0.state = .unavailable
                 $0.serverRunning = false
                 $0.collectorRunning = false
                 $0.lastError = "LM Studio CLI not installed"
+            }
+            store.setLoadedModels([], for: .lmStudio)
+            return
+        }
+        guard appRunning else {
+            store.updateRuntimeHealth(.lmStudio) {
+                $0.state = .installed
+                $0.serverRunning = false
+                $0.collectorRunning = false
+                $0.lastError = nil
             }
             store.setLoadedModels([], for: .lmStudio)
             return

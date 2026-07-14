@@ -266,6 +266,20 @@ enum LoadedModelKind: String, Codable {
 
 struct LoadedModel: Equatable, Identifiable {
     var id: String { "\(provider.rawValue):\(instanceId ?? name)" }
+
+    /// Publish-gating equality: everything EXCEPT `expiresAt`, whose keep-alive
+    /// countdown moves on every /api/ps poll while a model is resident and is
+    /// displayed nowhere — comparing it defeated the equality gate and forced a
+    /// scene re-render every 10s. Revisit if the UI ever shows expiry.
+    func displayEquals(_ other: LoadedModel) -> Bool {
+        provider == other.provider && name == other.name
+            && instanceId == other.instanceId && kind == other.kind
+            && sizeBytes == other.sizeBytes && vramBytes == other.vramBytes
+            && contextLength == other.contextLength && family == other.family
+            && parameterSize == other.parameterSize && quantization == other.quantization
+            && format == other.format && parallelCapacity == other.parallelCapacity
+            && queuedRequests == other.queuedRequests && isGenerating == other.isGenerating
+    }
     let provider: UsageOrigin
     let name: String
     let instanceId: String?
@@ -335,6 +349,22 @@ struct RuntimeHealth: Equatable {
     var lastSuccess: Date?
     var lastEvent: Date?
     var lastError: String?
+
+    /// True when a change is worth publishing to SwiftUI. `lastSuccess` and
+    /// `lastEvent` are heartbeat timestamps that move on every successful poll
+    /// (10s/30s); publishing them re-rendered the whole scene — including the
+    /// ImageRenderer menu-bar bitmap — around the clock (~0.2% → ~2% idle CPU).
+    /// UsageStore keeps them in a non-published side map and overlays them at
+    /// read time, so excluding them here loses nothing the UI shows.
+    func significantlyDiffers(from other: RuntimeHealth) -> Bool {
+        provider != other.provider
+            || state != other.state
+            || version != other.version
+            || serverRunning != other.serverRunning
+            || collectorRunning != other.collectorRunning
+            || coverage != other.coverage
+            || lastError != other.lastError
+    }
 }
 
 enum StatsPeriod: String, CaseIterable, Identifiable {

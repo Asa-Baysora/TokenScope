@@ -29,6 +29,16 @@ final class LMStudioLogWatcher {
         }
     }
 
+    /// Synchronous stop for app-exit paths (applicationWillTerminate, SIGTERM):
+    /// the child must be signaled BEFORE exit(0), or it outlives us as an orphan.
+    func stopAndWait() {
+        queue.sync {
+            stopped = true
+            process?.terminate()
+            process = nil
+        }
+    }
+
     private var cliPath: String? {
         LMStudioCLI.path
     }
@@ -77,7 +87,7 @@ final class LMStudioLogWatcher {
                     $0.lastError = "model log stream exited (\(process.terminationStatus))"
                 }
                 guard !self.stopped else { return }
-                self.queue.asyncAfter(deadline: .now() + 30) { [weak self] in self?.launch() }
+                self.scheduleRelaunch()
             }
         }
         do {
@@ -98,7 +108,27 @@ final class LMStudioLogWatcher {
             }
             FileLog.log("LM Studio watcher failed to start: \(error.localizedDescription)")
             guard !stopped else { return }
-            queue.asyncAfter(deadline: .now() + 30) { [weak self] in self?.launch() }
+            scheduleRelaunch()
+        }
+    }
+
+    /// Retry every 30s, but only SPAWN when the LM Studio app is actually
+    /// running — `lms log stream` exits instantly otherwise, and blind respawns
+    /// meant a subprocess launch every 30s around the clock while LM Studio was
+    /// closed. The workspace check is an optimization only: the 30s cadence
+    /// itself never stops, so a wrong bundle id degrades to the old behavior at
+    /// worst. All hops are async (stopAndWait queue.syncs from main — a
+    /// main.sync here would deadlock).
+    private func scheduleRelaunch() {
+        queue.asyncAfter(deadline: .now() + 30) { [weak self] in
+            guard let self, !self.stopped else { return }
+            DispatchQueue.main.async {
+                let appRunning = LMStudioCLI.appIsRunning
+                self.queue.async { [weak self] in
+                    guard let self, !self.stopped else { return }
+                    if appRunning { self.launch() } else { self.scheduleRelaunch() }
+                }
+            }
         }
     }
 

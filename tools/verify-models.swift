@@ -130,6 +130,82 @@ struct ModelChecks {
                    && unmeteredTotals.input == 10 && unmeteredTotals.output == 5,
                    "Totals.unmetered counts only unknown-accuracy zero-token calls")
 
+        // desktopAndProxyOverlap: the Desktop DB's model_name can be '' (unknown,
+        // not different) — an empty DESKTOP model must still shadow against a
+        // named proxy twin when the timing gates hold; different named models
+        // must never shadow.
+        let overlapNow = Date()
+        func ollamaEvent(source: EventSource, model: String, startLag: TimeInterval = 0) -> UsageEvent {
+            UsageEvent(
+                timestamp: overlapNow, startedAt: overlapNow.addingTimeInterval(-30 + startLag),
+                provider: .ollama, source: source, model: model,
+                sessionId: nil, projectName: nil, inputTokens: source == .proxy ? 10 : 0,
+                outputTokens: source == .proxy ? 5 : 0, cacheReadTokens: 0,
+                cacheCreationTokens: 0, reasoningTokens: 0,
+                tokenAccuracy: source == .proxy ? .exact : .unknown)
+        }
+        try expect(EventReconciler.desktopAndProxyOverlap(
+                       ollamaEvent(source: .ollamaDesktop, model: ""),
+                       ollamaEvent(source: .proxy, model: "gemma")),
+                   "empty desktop model wildcards against a named proxy twin")
+        try expect(!EventReconciler.desktopAndProxyOverlap(
+                       ollamaEvent(source: .ollamaDesktop, model: "llama"),
+                       ollamaEvent(source: .proxy, model: "gemma")),
+                   "different named models never shadow")
+        // The DB row starts AFTER the HTTP request (prompt-eval lag, unbounded):
+        // a desktop start 12s late must still shadow; a desktop start 12s BEFORE
+        // the request is a different call and must not.
+        try expect(EventReconciler.desktopAndProxyOverlap(
+                       ollamaEvent(source: .ollamaDesktop, model: "gemma", startLag: 12),
+                       ollamaEvent(source: .proxy, model: "gemma")),
+                   "prompt-eval start lag still shadows (containment, not equality)")
+        try expect(!EventReconciler.desktopAndProxyOverlap(
+                       ollamaEvent(source: .ollamaDesktop, model: "gemma", startLag: -12),
+                       ollamaEvent(source: .proxy, model: "gemma")),
+                   "desktop row starting before the request never shadows")
+
+        // Publish gating: heartbeat timestamps must not count as significant;
+        // every field the UI keys structure/colors off must.
+        var healthA = RuntimeHealth(provider: .ollama)
+        var healthB = healthA
+        healthB.lastSuccess = Date()
+        healthB.lastEvent = Date()
+        try expect(!healthA.significantlyDiffers(from: healthB),
+                   "lastSuccess/lastEvent alone are not significant")
+        healthB.state = .connected
+        try expect(healthA.significantlyDiffers(from: healthB), "state change is significant")
+        healthB = healthA; healthB.serverRunning = true
+        try expect(healthA.significantlyDiffers(from: healthB), "serverRunning change is significant")
+        healthB = healthA; healthB.lastError = "boom"
+        try expect(healthA.significantlyDiffers(from: healthB), "lastError change is significant")
+        healthB = healthA; healthB.version = "0.3.30"
+        try expect(healthA.significantlyDiffers(from: healthB), "version change is significant")
+        healthA.lastSuccess = Date(timeIntervalSince1970: 1)
+
+        // LoadedModel.displayEquals ignores only the expiresAt countdown.
+        let modelA = LoadedModel(provider: .ollama, name: "gemma", sizeBytes: 7,
+                                 expiresAt: Date(timeIntervalSince1970: 100))
+        let modelB = LoadedModel(provider: .ollama, name: "gemma", sizeBytes: 7,
+                                 expiresAt: Date(timeIntervalSince1970: 200))
+        let modelC = LoadedModel(provider: .ollama, name: "gemma", sizeBytes: 8,
+                                 expiresAt: Date(timeIntervalSince1970: 100))
+        try expect(modelA.displayEquals(modelB), "expiresAt drift alone is not a display change")
+        try expect(!modelA.displayEquals(modelC), "any other field change is a display change")
+
+        // ProcessReaper.candidates: only launchd-adopted (ppid 1) processes whose
+        // argv matches the exact lms log stream invocation are reap candidates.
+        let psFixture = """
+        101     1 /Users/x/.lmstudio/bin/lms log stream --source model --filter output --stats --json
+        150     1 /Users/x/.lmstudio/bin/lms log stream --source model --stats --json
+        202   555 /Users/x/.lmstudio/bin/lms log stream --source model --filter output --stats --json
+        303     1 /Users/x/.lmstudio/bin/lms log stream
+        404     1 /usr/bin/tail -f something
+        """
+        let reapable = ProcessReaper.candidates(
+            psOutput: psFixture, argvContains: ProcessReaper.lmsLogStreamArgv)
+        try expect(reapable == [101, 150],
+                   "reaper matches orphaned (ppid 1) streams across argv versions, nothing else")
+
         print("model checks passed")
     }
 

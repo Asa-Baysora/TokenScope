@@ -510,7 +510,14 @@ Exactly one copy is counted:
   regression: it permanently double-counts every non-exact proxy copy.
 - **Ollama Desktop** metadata events are separately shadowed against overlapping proxy
   observations (`EventReconciler.desktopAndProxyOverlap`), so a Desktop call that was
-  also proxied counts once.
+  also proxied (the GUI-redirect setup) counts once. The match: completion times
+  within **4 s** (the strong anchor — both sides stamp at stream end), same model
+  (an **empty** Desktop `model_name` wildcards — unknown ≠ different; the proxy side
+  never wildcards), and **containment** on starts — the DB row must not start more
+  than 4 s *before* the HTTP request. Starts are deliberately not compared for
+  equality: the app inserts the row only after prompt evaluation, so the row start
+  lags the request start by an unbounded prompt-eval time (measured 5 s on a small
+  chat). There is no duration gate — the two anchors imply it.
 - Shadowed events are excluded from **every** aggregate and from the heatmap, but kept
   in the "Latest calls" log.
 
@@ -891,6 +898,20 @@ data is a couple MB), 8 threads, ~7 KB log. **CPU is the metric to guard.** Do n
 - **Poll cadence:** limits 60 s, ChatGPT limits 60 s, status 300 s, Ollama health/models 10 s,
   LM Studio health/models 30 s, transcript/codex 1 s (hot-file only), LM Studio relaunch backoff 30 s. Don't add
   per-second work.
+- **Publish only on significant change** (2026-07-14, fixed a ~0.2%→~2% idle-CPU
+  regression): `updateRuntimeHealth` gates on `RuntimeHealth.significantlyDiffers`,
+  which excludes the `lastSuccess`/`lastEvent` heartbeats — those live in a
+  non-published pulse map and are overlaid by the computed `runtimeHealth` at read
+  time, so the UI still shows fresh values whenever it renders. `setLoadedModels`
+  gates on `LoadedModel.displayEquals`, which excludes Ollama's `expiresAt`
+  keep-alive countdown (displayed nowhere). An unconditional publish re-runs the
+  SwiftUI scene body and re-rasterizes the menu-bar bitmap (ImageRenderer) — at a
+  10 s poll cadence that alone is ~2% CPU around the clock.
+- **LM Studio spawns are skipped while the app is closed** (`LMStudioCLI.appIsRunning`,
+  bundle id `ai.elementlabs.lmstudio`, checked on main — AppKit): both the
+  log-stream relaunch and the status poller's two CLI invocations. The 30 s retry
+  cadence itself never stops, so a wrong/renamed bundle id degrades to the old
+  spawn-per-cycle behavior, never to a dead collector.
 
 ---
 
@@ -932,6 +953,26 @@ the rationale lives here.
     `ImageRenderer` renders glass as opaque white. Use `.sectionCard()` (a flat fill).
 16. **Privacy:** persist only operational metadata; never persist prompt/reply/tool
     content or raw provider/CLI errors. Keep LM Studio's `--filter output` boundary.
+17. **Never leak the `lms log stream` child** — three layers, all required
+    (28 orphans ≈ 1.6 GB accumulated before them): headless paths
+    (`--snapshot`/`--menubar`/`--gauges`) never start the LM Studio services
+    (side effect: snapshots show LM Studio's not-started default row — expected);
+    `applicationWillTerminate` **and** a SIGTERM `DispatchSource` (our own install
+    flow uses `pkill -x TokenScope`) call `lmStudio.stopAndWait()` before exit;
+    `ProcessReaper.reapStaleLMStudioLogStreams()` runs once at startup, killing
+    only launchd-adopted (`ppid == 1`) processes matching the stream's stable
+    argv core (covers SIGKILL/crash; a live instance's child or a user's
+    shell-run `lms` never matches).
+18. **Publish gating stays** (§15): `significantlyDiffers`/`displayEquals` gate
+    `runtimeHealth`/`loadedModels` publishes; heartbeat timestamps and
+    `expiresAt` are deliberately excluded from the comparisons. If code ever
+    needs to *react* to heartbeat changes, subscribe to something else — they no
+    longer publish.
+19. **Desktop/proxy shadow gates** (§7.4): completion-within-4s + model (empty
+    Desktop side wildcards) + start containment. Do NOT reintroduce start
+    *equality* or a duration gate — the DB row start lags the request start by
+    unbounded prompt-eval time, and those gates silently double-counted every
+    routed GUI chat.
 
 ---
 
