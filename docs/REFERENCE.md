@@ -5,7 +5,7 @@
 > *without reading the Swift source*. Where a fact is load-bearing, the file and the
 > exact value are named so you can jump to it.
 >
-> **Reflects:** v0.1.3 (`CFBundleVersion` 4), 2026-07-14.
+> **Reflects:** v0.1.4 (`CFBundleVersion` 5), 2026-07-16.
 > When you change behavior, update this file in the same commit.
 >
 > **Companion docs:** `CLAUDE.md` is the always-loaded working checklist for coding
@@ -616,15 +616,22 @@ contexts (`BrandMark.color`, and the headless `--snapshot`/`--menubar` binaries 
 
 ## 9. The UI
 
-`MenuView.swift` — the `MenuBarExtra(.window)` popup. Structure: an always-visible
-**Limits header**, a custom **tab bar**, the active tab's **collapsible sections** in a
-`ScrollView`, and an always-visible **footer** (service status).
+`MenuView.swift` — the `MenuBarExtra(.window)` popup. Structure: an aggregate-status
+**header**, an adaptive pinned **limits rail**, one fixed-height **facet body**, and a
+custom bottom **tab bar**. Only the facet body changes; the popup remains 430 pt wide
+and does not resize when tabs change.
 
-### 9.1 Why the header is not a tab
-The Limits header (claude.ai + Codex utilization) sits **above** the tabs and renders
-on **every** tab (including Settings) so the tab bar never jumps vertically. Its scope
-(whole account) and unit (%) differ from the local-token tabs, and "how close to the
-wall" is the most actionable glance.
+### 9.1 Persistent header + adaptive limit rail
+The header collapses Claude/OpenAI service status to one `operational` label when both
+are healthy and names affected services when either is degraded. The limit rail sits
+below it on every facet because "how close to the wall" is the primary glance.
+
+The rail is data-driven: only available Codex primary/secondary and Claude 5h/7d
+windows render. One to four cells divide the full width equally, so a missing window
+leaves no hole. Display order is Codex primary → Codex secondary → Claude 5h → Claude
+7d. `NEAREST` is computed from the highest available utilization. With no windows, a
+single compact connect/awaiting row replaces the cells. Color thresholds everywhere
+are `<60%` green, `60...85%` amber, and `>85%` red.
 
 ### 9.2 The tab bar
 A **custom button row** (`HStack` of `Button`s), deliberately **not** a segmented
@@ -638,39 +645,31 @@ Four tabs (raw value / title / SF Symbol):
 | `history` | **History** | `calendar` |
 | `settings` | **Settings** | `gearshape.fill` |
 
-Default tab `now`. (Note the intentional raw≠title mismatch for `now`/"Activity".)
+Default/fallback tab `usage`; the persisted raw value `now` remains Activity for
+backward compatibility.
 
-### 9.3 Limits header cards
-Two cards, `limitRow` each:
-- **CLAUDE LIMITS** — shown only when `limits.connected`; a "Connect claude.ai" prompt
-  (jumps to Settings) otherwise. One row per `five_hour`/`seven_day`/`seven_day_sonnet`.
-- **CODEX LIMITS** — always shown, fed by the active source; connect/enable prompt
-  varies by cookie-vs-local.
-- Each row: label · `resets <until>` · `NN%` (colored by the ramp) · a 5 pt capsule bar
-  (min fill width 3 pt so 0% is still visible).
-- **Reset countdown format** (`untilString`): `now` / `in Nm` / `in Nh Nm` / `in Nd Nh`.
+### 9.3 Facet viewport and motion
+The live facet body is a 304 pt scroll viewport; snapshot mode renders the same height
+inline because `NSScrollView` is invisible to `ImageRenderer`. Tab/detail transitions
+use a 150 ms ease-in-out animation and become immediate with Reduce Motion.
 
-### 9.4 Activity ("now") tab
-- **Live** section: either "Idle — no call in flight" (gray dot) or, per live call,
+### 9.4 Activity (`now`) facet
+- **Now**: either "Idle — no call in flight" (gray dot) or, per live call,
   provider/model/operation + `↑ input ↓ ~estimated-output`; plus loaded Ollama and LM
   Studio models with provider and available runtime metadata.
 - **Latest calls** section: the **8** most recent **non-shadowed** events (not
   period-scoped), including operation, failed state/HTTP code, accuracy marker, and
   available duration or throughput.
 
-### 9.5 Usage tab
-- **Period picker** (segmented): Today / 7 Days / 30 Days. Fixed caption naming the
-  four local providers and the exclusions.
-- **Tokens over time** (chart): per-**hour** for Today, per-**day** otherwise; future
-  slots blank. Header controls are **plain-SwiftUI pills** (`chartPill`), not a
-  segmented Picker/checkbox — the AppKit-backed mini controls misreport their
-  intrinsic width in the popup and drew over each other, and they were invisible
-  in snapshots. **Stacked ↔ Grouped** pills (`BarChartStyle`); **Hide weekends**
-  pill (daily views only, `HideWeekends`); a dashed **kernel-regression trendline**
-  (Gaussian Nadaraya–Watson, bandwidth `max(1.25, n/6)`, drawn when ≥3 points).
-  Stacked order bottom→top: lmStudio, ollama, codex, claude. Per-bar `.help` tooltip
-  gives the exact split. `· incl. cache` appears when `ChartIncludeCache` is on.
-- **Providers & models**: one `providerRow` per provider (Claude, Codex, Ollama, LM
+### 9.5 Usage facet
+- Default resting facet. Plain-SwiftUI Today / 7 Days / 30 Days selector.
+- Large monospaced headline = fresh input/output plus cache when the cache preference
+  is enabled. Cost is intentionally absent until a real pricing table exists.
+- Compact Claude Code and Codex provider bars lead to a provider/model detail facet.
+- **Tokens over time** sparkline: per-**hour** for Today and per-**day** otherwise,
+  with a computed peak annotation. `· incl. cache` appears when
+  `ChartIncludeCache` is on.
+- **Provider/model drill-in**: one `providerRow` per provider (Claude, Codex, Ollama, LM
   Studio), **two lines each**: name + call count on the first line (name at natural
   width — never a fixed column, which split "LM Studio"), metrics on their own indented
   line (`↑in +cache ↓out · reasoning`, every `Text` `fixedSize()`d so wide numbers can
@@ -680,47 +679,49 @@ Two cards, `limitRow` each:
   displayed honestly: all-unmetered providers/models/sessions say **"tokens
   unavailable"** / **"no token data"**, mixed ones append `· N unmetered` — the UI
   never fabricates a `↑ 0 ↓ 0`. (Same rule `callDetail` applies in Latest calls.)
-- **Performance & reliability**: the shared `PerformanceAggregator` summarizes Ollama
-  and LM Studio with call/completion/failure/cancellation/estimated counts and medians
-  for tokens/sec, TTFT, and duration using only events that report each metric.
-- **Sessions**: an origin filter pill row (All / Claude / Codex / Ollama / LM Studio,
+- Bottom chips show fresh tokens, cache tokens, and the top attributed project.
+- **Session drill-in**: an origin filter pill row (All / Claude / Codex / Ollama / LM Studio,
   `SessionOriginFilter`), then up to **6** sessions (`+ N more`). Green dot = active in
   the last **15 min**; titles are Claude Code's `/resume` names where available.
 
-### 9.6 History tab
+### 9.6 History facet
 - **Last 6 months**: a `26×7` heatmap (`weeks = 26`), 13 pt cells, 2 pt gaps, month
   labels along the top, a provider legend, and a per-cell `.help` tooltip with the
   exact split. Cell **hue** = OKLab `blend(...)` weighted by each provider's share;
   **opacity** = `0.32 + 0.68·√(day/maxInWindow)` (0.32 floor for any non-zero day, 1.0
   at the busiest day). Zero days and future days render as faint gray / clear.
+- **Model performance**: up to five models ranked by observed calls. The shared
+  `PerformanceAggregator` reports median tokens/sec, TTFT, duration, and failure count
+  only where events actually contain each metric; unsupported values are never faked.
 
-### 9.7 Settings tab
-Three clusters — **SOURCES**, **DISPLAY**, **NOTIFICATIONS**:
-- **Sources:** claude.ai cookie `SecureField` + Save/Disconnect; Codex method pills
+### 9.7 Settings facet
+Five resting rows drill into one settings panel at a time:
+- **Connections:** claude.ai cookie `SecureField` + Save/Disconnect; Codex method pills
   (Cookie *recommended* vs Local sessions) with the matching cookie field or status;
   Ollama daemon + proxy-listener health and **Copy Ollama env**; LM Studio
   install/version/telemetry/API-server health. Each states its actual coverage.
-- **Display:** *Menu bar shows* (5 checkboxes → `MenuBarItems`), *Include cached tokens
-  in chart & heatmap* (`ChartIncludeCache`), *Provider colors* (7 swatches + hex field
-  per provider, Reset), *Show sections* (one checkbox per collapsible section).
+- **Menu bar shows:** five checkboxes → `MenuBarItems`, plus the relocated Quit action.
+- **Provider colors:** seven swatches + hex field per provider, Reset.
+- **Usage chart:** cache toggle and legacy supporting-detail visibility controls.
 - **Notifications:** Claude thresholds, Codex thresholds, Anthropic status changes,
   OpenAI status changes.
 
-### 9.8 Collapsible / hideable sections
+### 9.8 Legacy section preferences
 Two comma-joined `@AppStorage` string sets: `CollapsedSections` (body chevron-collapsed,
 header still shown) and `HiddenSections` (removed entirely, re-enabled from Settings).
-The seven section ids (`AppSection`): `live`, `latest` (Activity); `chart`, `providers`,
-`performance`, `sessions` (Usage); `heatmap` (History). The Limits header is **not** an `AppSection` —
-it cannot be collapsed or hidden.
+The stored values are preserved non-destructively for compatibility. Resting facets
+no longer stack collapsible cards; advanced visibility controls remain available in
+the Usage-chart settings detail. The pinned limit rail cannot be hidden.
 
-### 9.9 Footer
-Always visible: Claude and OpenAI service status, each linked to its public status page;
-up to 2 incidents and 3 degraded components shown.
+### 9.9 Service status and Quit relocation
+Service status moved from the footer into the persistent header. Quit moved into the
+Menu-bar settings detail so removing the footer does not remove functionality.
 
 ### 9.10 Snapshot rendering
-`MenuView(snapshotInline: true)` renders the active tab **inline** (no `ScrollView`,
-no height plumbing) because `NSScrollView` won't draw in `ImageRenderer`. Live, the
-scroll area is clamped to `min(max(contentHeight, 80), 520)`.
+`MenuView(snapshotInline: true)` renders the active facet in the same fixed 304 pt
+viewport without `ScrollView`, because `NSScrollView` will not draw in `ImageRenderer`.
+`SNAPSHOT_LIMITS=all|three|two|one|none` injects deterministic rail fixtures for visual
+coverage without changing production data sources.
 
 ---
 
@@ -794,7 +795,7 @@ View-bound; the rest are read directly.
 ### Display / UI (mostly `@AppStorage`, set in `MenuView`)
 | Key | Type | Default | Meaning |
 |---|---|---|---|
-| `ActiveTab` | String | `now` | selected tab |
+| `ActiveTab` | String | `usage` | selected tab (`now` remains Activity) |
 | `StatsPeriod` | String | `today` | Usage period picker |
 | `BarChartStyle` | String | `stacked` | chart stacked vs grouped |
 | `HideWeekends` | Bool | `false` | weekend filter (daily views) |
@@ -867,11 +868,17 @@ swift build -c release            # compile
 ```
 
 `build-app.sh` writes the `Info.plist` (bundle id `com.tokenscope`,
-`CFBundleShortVersionString` = 0.1.2, `CFBundleVersion` = 3, `LSUIElement true`),
+`CFBundleShortVersionString` = 0.1.4, `CFBundleVersion` = 5, `LSUIElement true`),
 generates the icon from `tools/make-icon.swift` if missing, and `codesign --force
 --sign -` (ad-hoc). `Package.swift` is a single executable target, no dependencies.
 
 **Verify UI before installing — always look at a snapshot:**
+
+For a source-only checkpoint on a machine with Command Line Tools but without
+full Xcode, run `CLI_ONLY=1 ./scripts/verify-redesign.sh`. This parses every Swift
+source and runs the model, adaptive-rail, protocol, and LM Studio regressions;
+the release build and snapshot matrix remain intentionally skipped.
+
 ```sh
 .build/release/TokenScope --snapshot /tmp/menu.png
 SNAPSHOT_PERIOD=month SNAPSHOT_HIDE_WEEKENDS=1 .build/release/TokenScope --snapshot /tmp/menu-30d.png
@@ -1020,6 +1027,7 @@ the rationale lives here.
 |---|---|
 | `TokenScopeApp.swift` | `@main` dispatch, `AppServices` wiring, `MenuBarExtra` scene, menu-bar image assembly, `--snapshot/--gauges/--menubar` |
 | `Models.swift` | `UsageOrigin`, `EventSource`, `UsageEvent`, `LiveCall`, `Totals`, `SessionAgg`, `StatsPeriod`, `DayStat`, `DayAgg` |
+| `LimitRailPresentation.swift` | pure adaptive-rail ordering, nearest selection, and limit severity thresholds |
 | `UsageStore.swift` | event window, history, backfill, shadowing, dedup, aggregates, persistence, clock |
 | `TranscriptWatcher.swift` | Claude Code transcript tail + session titles + backfill |
 | `CodexTranscriptWatcher.swift` | Codex session-log tail (token_count/rate_limits) + backfill |

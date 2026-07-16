@@ -15,8 +15,10 @@ Read it before any non-trivial change. `docs/ARCHITECTURE.md` is a one-screen ov
 that points there. The sections below are the terse always-loaded working checklist;
 `REFERENCE.md` carries the full rationale for each item.
 
-UI is tabbed (Now / Usage / History / Settings); sections within a tab are
-collapsible (persisted) and hideable from Settings.
+UI uses a fixed three-zone popup: aggregate-status header + adaptive pinned limit
+rail, one fixed-height facet at a time, and bottom tabs (Usage / Activity / History /
+Settings). Supporting provider/session/settings detail drills in within its facet;
+legacy section visibility preferences are retained under Usage-chart settings.
 
 ## Build, verify, install
 
@@ -25,7 +27,7 @@ swift build -c release                       # compile
 ./build-app.sh                               # build TokenScope.app (bundle + icon)
 
 # Pure regression suites (framework-free so CommandLineTools-only Macs work):
-swiftc Sources/TokenScope/Models.swift Sources/TokenScope/EventReconciler.swift Sources/TokenScope/PerformanceAggregator.swift Sources/TokenScope/ProcessReaper.swift Sources/TokenScope/Fmt.swift tools/verify-models.swift -o /tmp/tokenscope-model-checks && /tmp/tokenscope-model-checks
+swiftc Sources/TokenScope/Models.swift Sources/TokenScope/LimitRailPresentation.swift Sources/TokenScope/EventReconciler.swift Sources/TokenScope/PerformanceAggregator.swift Sources/TokenScope/ProcessReaper.swift Sources/TokenScope/Fmt.swift tools/verify-models.swift -o /tmp/tokenscope-model-checks && /tmp/tokenscope-model-checks
 swiftc Sources/TokenScope/Models.swift Sources/TokenScope/HTTPRequestScanner.swift Sources/TokenScope/HTTPIdentityEncodingRewriter.swift Sources/TokenScope/HTTPResponseFramer.swift Sources/TokenScope/ResponseScanner.swift tools/verify-protocols.swift -o /tmp/tokenscope-protocol-checks && /tmp/tokenscope-protocol-checks
 swiftc Sources/TokenScope/Models.swift Sources/TokenScope/LMStudioEventParser.swift tools/verify-lmstudio.swift -o /tmp/tokenscope-lmstudio-checks && /tmp/tokenscope-lmstudio-checks
 
@@ -33,6 +35,12 @@ swiftc Sources/TokenScope/Models.swift Sources/TokenScope/LMStudioEventParser.sw
 .build/release/TokenScope --snapshot /tmp/menu.png
 SNAPSHOT_PERIOD=month SNAPSHOT_HIDE_WEEKENDS=1 .build/release/TokenScope --snapshot /tmp/menu-30d.png
 # SNAPSHOT_PERIOD=today|week|month, SNAPSHOT_HIDE_WEEKENDS=0|1, SNAPSHOT_BAR_STYLE=stacked|grouped, SNAPSHOT_INCLUDE_CACHE=0|1
+# SNAPSHOT_TAB=usage|now|history|settings, SNAPSHOT_LIMITS=all|three|two|one|none
+
+# Full redesign checkpoint (requires a complete Xcode toolchain):
+./scripts/verify-redesign.sh
+# Command Line Tools only (parsing and non-UI regressions; no app/snapshots):
+CLI_ONLY=1 ./scripts/verify-redesign.sh
 
 # install (the login item points at /Applications — ALWAYS re-ditto after rebuild):
 pkill -x TokenScope; ./build-app.sh

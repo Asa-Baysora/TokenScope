@@ -16,6 +16,17 @@ struct ProviderPerformanceSummary: Identifiable, Equatable {
     let medianDurationSeconds: Double?
 }
 
+struct ModelPerformanceSummary: Identifiable, Equatable {
+    var id: String { "\(provider.rawValue):\(model)" }
+    let provider: UsageOrigin
+    let model: String
+    let calls: Int
+    let failed: Int
+    let medianTokensPerSecond: Double?
+    let medianTimeToFirstTokenSeconds: Double?
+    let medianDurationSeconds: Double?
+}
+
 enum PerformanceAggregator {
     static func summarize(
         _ events: [UsageEvent],
@@ -47,5 +58,25 @@ enum PerformanceAggregator {
             return (sorted[middle - 1] + sorted[middle]) / 2
         }
         return sorted[middle]
+    }
+
+    static func summarizeByModel(_ events: [UsageEvent]) -> [ModelPerformanceSummary] {
+        let visible = events.filter { !$0.shadowed }
+        let groups = Dictionary(grouping: visible) { "\($0.provider.rawValue):\($0.model)" }
+        return groups.values.map { calls in
+            let sample = calls[0]
+            return ModelPerformanceSummary(
+                provider: sample.provider,
+                model: sample.model,
+                calls: calls.count,
+                failed: calls.filter { $0.status == .failed }.count,
+                medianTokensPerSecond: median(calls.compactMap(\.tokensPerSecond)),
+                medianTimeToFirstTokenSeconds: median(calls.compactMap(\.timeToFirstTokenSeconds)),
+                medianDurationSeconds: median(calls.compactMap(\.durationSeconds)))
+        }
+        .sorted {
+            if $0.calls != $1.calls { return $0.calls > $1.calls }
+            return $0.model.localizedCaseInsensitiveCompare($1.model) == .orderedAscending
+        }
     }
 }

@@ -1,7 +1,7 @@
 import Foundation
 
 /// Framework-free regression checks for the pure data model. Run with:
-/// swiftc Sources/TokenScope/Models.swift tools/verify-models.swift -o /tmp/tokenscope-model-checks && /tmp/tokenscope-model-checks
+/// swiftc Sources/TokenScope/Models.swift Sources/TokenScope/LimitRailPresentation.swift tools/verify-models.swift -o /tmp/tokenscope-model-checks && /tmp/tokenscope-model-checks
 @main
 struct ModelChecks {
     static func main() throws {
@@ -105,6 +105,38 @@ struct ModelChecks {
                    "LM Studio uses the shared performance aggregation")
         try expect(PerformanceAggregator.median([]) == nil && PerformanceAggregator.median([1, 3, 2]) == 2,
                    "median boundaries")
+
+        let modelSummaries = PerformanceAggregator.summarizeByModel(performanceEvents)
+        let qwen = modelSummaries.first { $0.model == "qwen" }
+        try expect(qwen?.calls == 2 && qwen?.failed == 1 && qwen?.medianTokensPerSecond == 20
+                   && close(qwen?.medianTimeToFirstTokenSeconds, 0.3),
+                   "per-model performance aggregation")
+
+        let rail = [
+            LimitRailReading(id: "claude-secondary", provider: .claude, period: .secondary,
+                             label: "Claude 7d", utilization: 85, resetsAt: nil),
+            LimitRailReading(id: "codex-primary", provider: .codex, period: .primary,
+                             label: "Codex 5h", utilization: 60, resetsAt: nil),
+            LimitRailReading(id: "claude-primary", provider: .claude, period: .primary,
+                             label: "Claude 5h", utilization: 85.1, resetsAt: nil),
+        ]
+        try expect(LimitRailPresentation.ordered(rail).map(\.id) ==
+                   ["codex-primary", "claude-primary", "claude-secondary"],
+                   "limit rail collapses missing windows while retaining canonical order")
+        let withoutCodexPrimary = LimitRailPresentation.ordered(rail.filter { $0.id != "codex-primary" })
+        let withoutClaudeSecondary = LimitRailPresentation.ordered(rail.filter { $0.id != "claude-secondary" })
+        try expect(withoutCodexPrimary.map(\.id) == ["claude-primary", "claude-secondary"]
+                   && withoutClaudeSecondary.map(\.id) == ["codex-primary", "claude-primary"],
+                   "any unavailable Codex or Claude window closes its rail gap")
+        try expect(LimitRailPresentation.nearestID(in: rail) == "claude-primary",
+                   "nearest limit is computed from available windows")
+        try expect(LimitRailPresentation.nearestID(in: []) == nil,
+                   "empty limit rail has no fabricated nearest window")
+        try expect(LimitSeverity(utilization: 59.9) == .healthy
+                   && LimitSeverity(utilization: 60) == .warning
+                   && LimitSeverity(utilization: 85) == .warning
+                   && LimitSeverity(utilization: 85.1) == .danger,
+                   "limit severity boundaries")
 
         // Totals.unmetered: metadata-only calls (unknown accuracy, zero tokens —
         // Ollama Desktop) are counted separately so the UI can say "tokens

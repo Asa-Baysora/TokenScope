@@ -56,23 +56,17 @@ final class LimitsManager: ObservableObject {
     var sessionPercent: Int? { percent("five_hour") }
     var weeklyPercent: Int? { percent("seven_day") }
 
-    // Color bands: green up to 75, gradient green→yellow 75–80, solid yellow
-    // 80–85, gradient yellow→red 85–90, red above 90.
-    private static let cGreen = (r: 0.20, g: 0.78, b: 0.35)
-    private static let cYellow = (r: 1.0, g: 0.80, b: 0.0)
-    private static let cRed = (r: 1.0, g: 0.23, b: 0.19)
+    // Shared redesign thresholds: <60 green, 60...85 amber, >85 red.
+    // Concrete sRGB values match the popup rail and menu-bar gauges.
+    private static let cGreen = (r: 48.0 / 255, g: 184.0 / 255, b: 92.0 / 255)
+    private static let cAmber = (r: 232.0 / 255, g: 152.0 / 255, b: 27.0 / 255)
+    private static let cRed = (r: 229.0 / 255, g: 72.0 / 255, b: 77.0 / 255)
 
     static func rgb(forPercent p: Double) -> (r: Double, g: Double, b: Double) {
-        func mix(_ a: (r: Double, g: Double, b: Double), _ b: (r: Double, g: Double, b: Double), _ t: Double) -> (r: Double, g: Double, b: Double) {
-            let t = min(max(t, 0), 1)
-            return (a.r + (b.r - a.r) * t, a.g + (b.g - a.g) * t, a.b + (b.b - a.b) * t)
-        }
-        switch p {
-        case ..<75: return cGreen
-        case ..<80: return mix(cGreen, cYellow, (p - 75) / 5)
-        case ..<85: return cYellow
-        case ..<90: return mix(cYellow, cRed, (p - 85) / 5)
-        default:    return cRed
+        switch LimitSeverity(utilization: p) {
+        case .healthy: return cGreen
+        case .warning: return cAmber
+        case .danger: return cRed
         }
     }
 
