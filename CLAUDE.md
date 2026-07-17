@@ -34,7 +34,7 @@ swiftc Sources/TokenScope/Models.swift Sources/TokenScope/LMStudioEventParser.sw
 # VERIFY UI BEFORE INSTALLING — render the menu with real data:
 .build/release/TokenScope --snapshot /tmp/menu.png
 SNAPSHOT_PERIOD=month SNAPSHOT_HIDE_WEEKENDS=1 .build/release/TokenScope --snapshot /tmp/menu-30d.png
-# SNAPSHOT_PERIOD=today|week|month, SNAPSHOT_HIDE_WEEKENDS=0|1, SNAPSHOT_BAR_STYLE=stacked|grouped, SNAPSHOT_INCLUDE_CACHE=0|1
+# SNAPSHOT_PERIOD=today|week|month, SNAPSHOT_HIDE_WEEKENDS=0|1, SNAPSHOT_BAR_STYLE=stacked|grouped, SNAPSHOT_INCLUDE_CACHE=0|1, SNAPSHOT_CHART_MODE=bar|line
 # SNAPSHOT_TAB=usage|now|history|settings, SNAPSHOT_LIMITS=all|three|two|one|none
 
 # Full redesign checkpoint (requires a complete Xcode toolchain):

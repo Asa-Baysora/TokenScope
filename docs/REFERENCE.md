@@ -5,7 +5,7 @@
 > *without reading the Swift source*. Where a fact is load-bearing, the file and the
 > exact value are named so you can jump to it.
 >
-> **Reflects:** v0.1.4 (`CFBundleVersion` 5), 2026-07-16.
+> **Reflects:** v0.1.5 (`CFBundleVersion` 6), 2026-07-17.
 > When you change behavior, update this file in the same commit.
 >
 > **Companion docs:** `CLAUDE.md` is the always-loaded working checklist for coding
@@ -666,9 +666,15 @@ use a 150 ms ease-in-out animation and become immediate with Reduce Motion.
 - Large monospaced headline = fresh input/output plus cache when the cache preference
   is enabled. Cost is intentionally absent until a real pricing table exists.
 - Compact Claude Code and Codex provider bars lead to a provider/model detail facet.
-- **Tokens over time** sparkline: per-**hour** for Today and per-**day** otherwise,
-  with a computed peak annotation. `· incl. cache` appears when
-  `ChartIncludeCache` is on.
+- **Tokens over time** chart with a **Bars / Line** toggle (`UsageChartMode`, default
+  **bar**): per-**hour** for Today and per-**day** otherwise; `· incl. cache` in the
+  facet header when `ChartIncludeCache` is on.
+  - **Bars** (default): per-slot provider bars — **Stacked** or **Grouped**
+    (`BarChartStyle`), with **Hide weekends** on multi-day periods, an overlaid
+    trendline, and a per-slot `.help` breakdown. This is the richer view; its
+    drawing (`usageBarPlot`/`chartBars`) is shared with the legacy usage tab.
+  - **Line**: the smoothed sparkline with a computed peak annotation. The
+    Stacked/Grouped/Hide-weekends pills hide in this mode.
 - **Provider/model drill-in**: one `providerRow` per provider (Claude, Codex, Ollama, LM
   Studio), **two lines each**: name + call count on the first line (name at natural
   width — never a fixed column, which split "LM Studio"), metrics on their own indented
@@ -797,7 +803,8 @@ View-bound; the rest are read directly.
 |---|---|---|---|
 | `ActiveTab` | String | `usage` | selected tab (`now` remains Activity) |
 | `StatsPeriod` | String | `today` | Usage period picker |
-| `BarChartStyle` | String | `stacked` | chart stacked vs grouped |
+| `BarChartStyle` | String | `stacked` | chart stacked vs grouped (bar mode) |
+| `UsageChartMode` | String | `bar` | usage chart: `bar` (per-provider bars) vs `line` (sparkline) |
 | `HideWeekends` | Bool | `false` | weekend filter (daily views) |
 | `ChartIncludeCache` | Bool | `true` | include cache tokens in chart & heatmap |
 | `CollapsedSections` | String (CSV) | `""` | collapsed section ids |
@@ -868,7 +875,7 @@ swift build -c release            # compile
 ```
 
 `build-app.sh` writes the `Info.plist` (bundle id `com.tokenscope`,
-`CFBundleShortVersionString` = 0.1.4, `CFBundleVersion` = 5, `LSUIElement true`),
+`CFBundleShortVersionString` = 0.1.5, `CFBundleVersion` = 6, `LSUIElement true`),
 generates the icon from `tools/make-icon.swift` if missing, and `codesign --force
 --sign -` (ad-hoc). `Package.swift` is a single executable target, no dependencies.
 

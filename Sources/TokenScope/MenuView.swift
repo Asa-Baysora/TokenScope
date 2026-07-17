@@ -33,6 +33,10 @@ struct MenuView: View {
     @AppStorage("ActiveTab") private var activeTabRaw = Tab.usage.rawValue
     @AppStorage("StatsPeriod") private var periodRaw = StatsPeriod.today.rawValue
     @AppStorage("BarChartStyle") private var barStyleRaw = "stacked"
+    // The usage chart draws as per-provider bars by default; a header toggle
+    // flips to the smoothed sparkline. Bars carry the provider breakdown and
+    // per-slot hover, so they're the richer default.
+    @AppStorage("UsageChartMode") private var chartModeRaw = "bar"
     @AppStorage("HideWeekends") private var hideWeekends = false
     // Cache reads/writes are most of the real context volume, so the chart
     // counts them by default; Settings can drop them for an in/out-only view.
@@ -506,20 +510,45 @@ struct MenuView: View {
             }
 
             if !isHidden(.chart) {
-                usageSparkline(spark)
-                    .frame(height: 49)
-                HStack {
-                    Text(period == .today ? "00:00" : period.label)
+                let barMode = chartModeRaw == "bar"
+                HStack(spacing: 6) {
+                    chartPill("Bars", selected: barMode,
+                              help: "Per-slot provider breakdown") { chartModeRaw = "bar" }
+                    chartPill("Line", selected: !barMode,
+                              help: "Smoothed total over the period") { chartModeRaw = "line" }
                     Spacer()
-                    if let peak {
-                        Text("peak \(sparkPeakLabel(peak.offset)) · \(Fmt.compact(peak.element))")
-                    }
-                    Spacer()
-                    Text(period == .today ? "now" : "today")
+                    if barMode { barStylePills }
                 }
-                .font(.system(size: 9, design: .monospaced))
-                .foregroundStyle(.tertiary)
-                .padding(.bottom, 9)
+                .padding(.bottom, 5)
+
+                if barMode {
+                    let bars = chartBars
+                    usageBarPlot(bars, height: 49)
+                        .frame(height: 49)
+                    HStack {
+                        Text(leadingEdgeLabel(bars))
+                        Spacer()
+                        Text(trailingEdgeLabel(bars))
+                    }
+                    .font(.system(size: 9, design: .monospaced))
+                    .foregroundStyle(.tertiary)
+                    .padding(.bottom, 9)
+                } else {
+                    usageSparkline(spark)
+                        .frame(height: 49)
+                    HStack {
+                        Text(period == .today ? "00:00" : period.label)
+                        Spacer()
+                        if let peak {
+                            Text("peak \(sparkPeakLabel(peak.offset)) · \(Fmt.compact(peak.element))")
+                        }
+                        Spacer()
+                        Text(period == .today ? "now" : "today")
+                    }
+                    .font(.system(size: 9, design: .monospaced))
+                    .foregroundStyle(.tertiary)
+                    .padding(.bottom, 9)
+                }
             }
 
             HStack(spacing: 7) {
@@ -1257,22 +1286,77 @@ struct MenuView: View {
         .help(help)
     }
 
-    private var chartBlock: some View {
+    /// Slots for the usage chart: hourly today, daily otherwise, with the
+    /// weekend filter applied for multi-day periods. Shared by the facet's bar
+    /// mode and the legacy usage tab.
+    private var chartBars: [DayStat] {
         let allBars = period == .today
             ? store.hourlyTotals(includeCache: chartIncludeCache)
             : store.dailyTotals(in: period, includeCache: chartIncludeCache)
-        let bars = (hideWeekends && period != .today)
+        return (hideWeekends && period != .today)
             ? allBars.filter { !Calendar.current.isDateInWeekend($0.day) }
             : allBars
+    }
+
+    /// The bar plot itself — stacked or grouped per-provider segments with the
+    /// overlaid trendline and per-slot hover breakdown. One implementation for
+    /// the Usage facet's bar mode and the legacy usage tab.
+    private func usageBarPlot(_ bars: [DayStat], height: CGFloat) -> some View {
         let grouped = barStyleRaw == "grouped"
         let maxV = grouped
             ? max(bars.map { max(max($0.claude, $0.codex), max($0.ollama, $0.lmStudio)) }.max() ?? 0, 1)
             : max(bars.map(\.total).max() ?? 0, 1)
         let maxTotal = max(bars.map(\.total).max() ?? 0, 1)
-        let barHeight: CGFloat = 42
         let spacing: CGFloat = period == .week ? 4 : 2
         let now = Date()
         let pastTotals = bars.filter { $0.day <= now }.map(\.total)
+        return ZStack(alignment: .bottom) {
+            HStack(alignment: .bottom, spacing: spacing) {
+                ForEach(bars) { d in
+                    Group {
+                        if d.day > now {
+                            Color.clear.frame(height: 1.5)
+                        } else if grouped {
+                            groupedBar(d, maxV: maxV, height: height)
+                        } else {
+                            stackedBar(d, maxV: maxV, height: height)
+                        }
+                    }
+                    .frame(maxWidth: .infinity)
+                    .frame(height: height, alignment: .bottom)
+                    .help(chartHelp(d))
+                }
+            }
+            Trendline(totals: pastTotals, slots: bars.count, maxV: maxTotal, spacing: spacing)
+                .frame(height: height)
+                .allowsHitTesting(false)
+        }
+    }
+
+    /// Stacked/Grouped choice pills (plus Hide weekends for multi-day periods).
+    /// Plain-SwiftUI pills, NOT a segmented Picker or checkbox Toggle: the
+    /// AppKit-backed mini controls misreport their intrinsic width in the
+    /// MenuBarExtra popup and drew over each other — and render as placeholders
+    /// in snapshots, which is how that overlap once escaped review.
+    @ViewBuilder private var barStylePills: some View {
+        if period != .today {
+            chartPill("Hide weekends", selected: hideWeekends,
+                      help: "Drop Saturdays and Sundays from the chart") {
+                hideWeekends.toggle()
+            }
+        }
+        chartPill("Stacked", selected: barStyleRaw == "stacked",
+                  help: "One bar per slot, providers stacked") {
+            barStyleRaw = "stacked"
+        }
+        chartPill("Grouped", selected: barStyleRaw == "grouped",
+                  help: "Side-by-side mini-bars per provider") {
+            barStyleRaw = "grouped"
+        }
+    }
+
+    private var chartBlock: some View {
+        let bars = chartBars
         return VStack(alignment: .leading, spacing: 3) {
             HStack(spacing: 10) {
                 Text((period == .today ? "per hour" : "per day") + (chartIncludeCache ? " · incl. cache" : ""))
@@ -1281,49 +1365,10 @@ struct MenuView: View {
                         ? "Bars include prompt-cache reads and writes — the context each call actually processed. Turn off in Settings."
                         : "Bars show fresh input + output only (cache excluded). Turn on in Settings.")
                 Spacer()
-                // Plain-SwiftUI pills, NOT a segmented Picker or checkbox Toggle:
-                // the AppKit-backed mini controls misreport their intrinsic width
-                // in the MenuBarExtra popup and drew over each other ("Hide
-                // weekends" under "Stacked") — and they render as placeholders in
-                // snapshots, which is how the overlap escaped review. Same pill
-                // pattern as the tab bar and session filter.
-                if period != .today {
-                    chartPill("Hide weekends", selected: hideWeekends,
-                              help: "Drop Saturdays and Sundays from the chart") {
-                        hideWeekends.toggle()
-                    }
-                }
-                chartPill("Stacked", selected: barStyleRaw == "stacked",
-                          help: "One bar per slot, providers stacked") {
-                    barStyleRaw = "stacked"
-                }
-                chartPill("Grouped", selected: barStyleRaw == "grouped",
-                          help: "Side-by-side mini-bars per provider") {
-                    barStyleRaw = "grouped"
-                }
+                barStylePills
             }
-            ZStack(alignment: .bottom) {
-                HStack(alignment: .bottom, spacing: spacing) {
-                    ForEach(bars) { d in
-                        Group {
-                            if d.day > now {
-                                Color.clear.frame(height: 1.5)
-                            } else if grouped {
-                                groupedBar(d, maxV: maxV, height: barHeight)
-                            } else {
-                                stackedBar(d, maxV: maxV, height: barHeight)
-                            }
-                        }
-                        .frame(maxWidth: .infinity)
-                        .frame(height: barHeight, alignment: .bottom)
-                        .help(chartHelp(d))
-                    }
-                }
-                Trendline(totals: pastTotals, slots: bars.count, maxV: maxTotal, spacing: spacing)
-                    .frame(height: barHeight)
-                    .allowsHitTesting(false)
-            }
-            .padding(.top, 4)   // keep the tallest bar clear of the header pills
+            usageBarPlot(bars, height: 42)
+                .padding(.top, 4)   // keep the tallest bar clear of the header pills
             HStack {
                 Text(leadingEdgeLabel(bars)).font(.system(size: 9)).foregroundStyle(.secondary)
                 Spacer()

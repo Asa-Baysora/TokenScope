@@ -12,6 +12,7 @@ enum Snapshot {
         if let p = env["SNAPSHOT_PERIOD"] { UserDefaults.standard.set(p, forKey: "StatsPeriod") }
         if let w = env["SNAPSHOT_HIDE_WEEKENDS"] { UserDefaults.standard.set(w == "1", forKey: "HideWeekends") }
         if let s = env["SNAPSHOT_BAR_STYLE"] { UserDefaults.standard.set(s, forKey: "BarChartStyle") }
+        if let m = env["SNAPSHOT_CHART_MODE"] { UserDefaults.standard.set(m, forKey: "UsageChartMode") }
         if let c = env["SNAPSHOT_INCLUDE_CACHE"] { UserDefaults.standard.set(c == "1", forKey: "ChartIncludeCache") }
         if let t = env["SNAPSHOT_TAB"] { UserDefaults.standard.set(t, forKey: "ActiveTab") }
         // Custom provider colors so snapshots can verify the palette drives the
