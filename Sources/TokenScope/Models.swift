@@ -391,7 +391,16 @@ enum StatsPeriod: String, CaseIterable, Identifiable {
 
 struct DayStat: Identifiable {
     let day: Date
+    /// What the chart PLOTS for this slot: fresh input+output, plus cache when
+    /// the includeCache toggle is on. Producers apply the toggle; every geometry
+    /// consumer reads this and needs no further arithmetic.
     var providers: [UsageOrigin: Int] = [:]
+    /// Cache reads+writes for this slot, ALWAYS populated regardless of the
+    /// toggle. Kept separate rather than folded in so the hover tooltip can
+    /// report the fresh/cache split exactly — at real ratios (cache is often
+    /// >98% of the total) the split is legible as text but not as bar geometry,
+    /// where the 1.5pt segment floor would inflate the fresh share several-fold.
+    var cached: [UsageOrigin: Int] = [:]
 
     var claude: Int {
         get { providers[.claudeCode, default: 0] }
@@ -412,6 +421,16 @@ struct DayStat: Identifiable {
 
     var id: Date { day }
     var total: Int { providers.values.reduce(0, +) }
+
+    /// Cache tokens for one origin (0 for local runtimes, which have no prompt cache).
+    func cache(_ o: UsageOrigin) -> Int { cached[o, default: 0] }
+
+    /// Fresh input+output for one origin. `providers` already carries cache when
+    /// the toggle is on, so subtract it back out in that case only.
+    func fresh(_ o: UsageOrigin, includeCache: Bool) -> Int {
+        let plotted = providers[o, default: 0]
+        return includeCache ? max(plotted - cache(o), 0) : plotted
+    }
 }
 
 /// One calendar day's frozen totals, persisted once the day leaves the live

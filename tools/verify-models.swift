@@ -238,6 +238,34 @@ struct ModelChecks {
         try expect(reapable == [101, 150],
                    "reaper matches orphaned (ppid 1) streams across argv versions, nothing else")
 
+        // DayStat carries the fresh/cache split for the chart & heatmap tooltips.
+        // `providers` is the PLOTTED value (toggle-aware); `cached` is always the
+        // cache portion, so `fresh` must subtract it back out only when the
+        // toggle folded it in.
+        var slot = DayStat(day: Date())
+        slot.claude = 269_000 + 86_700_000        // plotted with cache on
+        slot.cached[.claudeCode] = 86_700_000
+        slot.ollama = 994_000                      // local runtime: no cache
+        try expect(slot.fresh(.claudeCode, includeCache: true) == 269_000,
+                   "DayStat.fresh subtracts cache when the toggle folded it in")
+        try expect(slot.cache(.claudeCode) == 86_700_000,
+                   "DayStat.cache reports the cache portion")
+        try expect(slot.fresh(.ollama, includeCache: true) == 994_000
+                   && slot.cache(.ollama) == 0,
+                   "a runtime with no cache reports all-fresh")
+
+        var freshOnly = DayStat(day: Date())
+        freshOnly.claude = 269_000                 // plotted with cache OFF
+        freshOnly.cached[.claudeCode] = 86_700_000 // still recorded
+        try expect(freshOnly.fresh(.claudeCode, includeCache: false) == 269_000,
+                   "DayStat.fresh passes through when cache was never folded in")
+
+        var underflow = DayStat(day: Date())
+        underflow.claude = 100
+        underflow.cached[.claudeCode] = 500        // shadowed/partial data skew
+        try expect(underflow.fresh(.claudeCode, includeCache: true) == 0,
+                   "DayStat.fresh clamps at zero rather than reporting negative tokens")
+
         print("model checks passed")
     }
 

@@ -602,6 +602,7 @@ final class UsageStore: ObservableObject {
             case .ollama: stat.ollama += tokens
             case .lmStudio: stat.lmStudio += tokens
             }
+            stat.cached[e.provider, default: 0] += e.cacheReadTokens + e.cacheCreationTokens
             by[day] = stat
         }
         return (0..<period.days).reversed().compactMap { offset in
@@ -625,6 +626,7 @@ final class UsageStore: ObservableObject {
             case .ollama: out[h].ollama += tokens
             case .lmStudio: out[h].lmStudio += tokens
             }
+            out[h].cached[e.provider, default: 0] += e.cacheReadTokens + e.cacheCreationTokens
         }
         return out
     }
@@ -651,6 +653,7 @@ final class UsageStore: ObservableObject {
             case .ollama: stat.ollama += tokens
             case .lmStudio: stat.lmStudio += tokens
             }
+            stat.cached[e.provider, default: 0] += e.cacheReadTokens + e.cacheCreationTokens
             window[k] = stat
         }
 
@@ -665,6 +668,10 @@ final class UsageStore: ObservableObject {
                 stat.codex += includeCache ? h.codexWithCache : h.codex
                 stat.ollama += includeCache ? h.ollamaWithCache : h.ollama
                 stat.lmStudio += includeCache ? h.lmStudioWithCache : h.lmStudio
+                stat.cached[.claudeCode, default: 0] += h.claudeWithCache - h.claude
+                stat.cached[.codex, default: 0] += h.codexWithCache - h.codex
+                stat.cached[.ollama, default: 0] += h.ollamaWithCache - h.ollama
+                stat.cached[.lmStudio, default: 0] += h.lmStudioWithCache - h.lmStudio
             }
             out.append(stat)
         }

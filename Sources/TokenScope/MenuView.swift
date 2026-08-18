@@ -43,6 +43,9 @@ struct MenuView: View {
     @AppStorage("ChartIncludeCache") private var chartIncludeCache = true
     @AppStorage("CollapsedSections") private var collapsedRaw = ""
     @AppStorage("HiddenSections") private var hiddenRaw = ""
+    // Origins the user has switched off for the front-page split. Empty = show
+    // every origin that has usage in the period.
+    @AppStorage("HiddenFrontPageOrigins") private var hiddenOriginsRaw = ""
     @AppStorage("MenuBarItems") private var menuBarItemsRaw = "tokens"
     // How Codex usage is tracked: "local" (this Mac's ~/.codex sessions) or
     // "cookie" (the ChatGPT web endpoint — comprehensive & always current). Empty
@@ -477,9 +480,12 @@ struct MenuView: View {
         let fresh = totals.input + totals.output
         let cached = totals.cacheRead + totals.cacheCreate
         let headline = fresh + (chartIncludeCache ? cached : 0)
-        let claude = usageTokens(for: .claudeCode)
-        let codex = usageTokens(for: .codex)
-        let splitMax = max(max(claude, codex), 1)
+        // Every origin the user hasn't switched off that actually has usage in
+        // this period. Previously this was hardcoded to Claude Code + Codex, so
+        // Ollama and LM Studio tokens counted toward `headline` but had no bar —
+        // the split never reconciled with the total above it.
+        let split = frontPageSplit
+        let splitMax = max(split.map(\.value).max() ?? 1, 1)
         let spark = usageSparkValues
         let peak = spark.enumerated().max { $0.element < $1.element }
         return VStack(alignment: .leading, spacing: 0) {
@@ -501,10 +507,11 @@ struct MenuView: View {
             }
             .padding(.bottom, 11)
 
-            if !isHidden(.providers) {
+            if !isHidden(.providers), !split.isEmpty {
                 VStack(spacing: 9) {
-                    providerUsageBar(.claudeCode, value: claude, maxValue: splitMax)
-                    providerUsageBar(.codex, value: codex, maxValue: splitMax)
+                    ForEach(split, id: \.origin.rawValue) { entry in
+                        providerUsageBar(entry.origin, value: entry.value, maxValue: splitMax)
+                    }
                 }
                 .padding(.bottom, 9)
             }
@@ -600,7 +607,7 @@ struct MenuView: View {
             VStack(spacing: 4) {
                 HStack(spacing: 6) {
                     BrandMarkView(origin: provider, size: 10)
-                    Text(provider == .claudeCode ? "Claude Code" : provider.displayName)
+                    Text(frontPageLabel(provider))
                         .font(.system(size: 11.5))
                     Spacer()
                     Text(Fmt.compact(value)).font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary)
@@ -622,6 +629,27 @@ struct MenuView: View {
         let totals = store.totals(for: provider, in: period)
         return totals.input + totals.output
             + (chartIncludeCache ? totals.cacheRead + totals.cacheCreate : 0)
+    }
+
+    struct FrontPageEntry {
+        let origin: UsageOrigin
+        let value: Int
+    }
+
+    /// Origins to bar on the summary page: enabled in Settings and non-zero for
+    /// the period. The zero filter matches `providerTotalChip`'s `calls > 0`, so
+    /// an idle runtime doesn't hold an empty bar open all day.
+    private var frontPageSplit: [FrontPageEntry] {
+        UsageOrigin.allCases
+            .filter { !isOriginHidden($0) }
+            .map { FrontPageEntry(origin: $0, value: usageTokens(for: $0)) }
+            .filter { $0.value > 0 }
+    }
+
+    /// The summary page has always spelled Claude Code out in full, while
+    /// `displayName` says just "Claude" for the compact rows elsewhere.
+    private func frontPageLabel(_ o: UsageOrigin) -> String {
+        o == .claudeCode ? "Claude Code" : o.displayName
     }
 
     private var usageSparkValues: [Int] {
@@ -825,6 +853,7 @@ struct MenuView: View {
                 providerColorsGroup
             case .chart:
                 usageChartGroup
+                frontPageProvidersGroup
                 showSectionsGroup
             case .notifications:
                 notificationsGroup
@@ -866,6 +895,9 @@ struct MenuView: View {
     private func isHidden(_ s: AppSection) -> Bool { listContains(hiddenRaw, s.rawValue) }
     private func toggleCollapsed(_ s: AppSection) { toggleInList(&collapsedRaw, s.rawValue) }
     private func toggleHidden(_ s: AppSection) { toggleInList(&hiddenRaw, s.rawValue) }
+
+    private func isOriginHidden(_ o: UsageOrigin) -> Bool { listContains(hiddenOriginsRaw, o.rawValue) }
+    private func toggleOriginHidden(_ o: UsageOrigin) { toggleInList(&hiddenOriginsRaw, o.rawValue) }
 
     private func listContains(_ raw: String, _ v: String) -> Bool {
         raw.split(separator: ",").contains(Substring(v))
@@ -1386,7 +1418,34 @@ struct MenuView: View {
     private func chartHelp(_ d: DayStat) -> String {
         let label = period == .today ? Self.hourFmt.string(from: d.day) : Self.dayFmt.string(from: d.day)
         let suffix = chartIncludeCache ? " (incl. cache)" : ""
-        return "\(label): Claude \(Fmt.compact(d.claude)) · Codex \(Fmt.compact(d.codex)) · Ollama \(Fmt.compact(d.ollama)) · LM Studio \(Fmt.compact(d.lmStudio))\(suffix)"
+        let parts = UsageOrigin.allCases
+            .filter { d.providers[$0, default: 0] > 0 }
+            .map { originHelpPart($0, d) }
+        guard !parts.isEmpty else { return "\(label): no usage" }
+        return "\(label): " + parts.joined(separator: " · ") + suffix
+    }
+
+    private func heatmapHelp(_ d: DayStat) -> String {
+        let parts = UsageOrigin.allCases
+            .filter { d.providers[$0, default: 0] > 0 }
+            .map { originHelpPart($0, d) }
+        guard !parts.isEmpty else { return "\(Self.dayFmt.string(from: d.day)): no usage" }
+        return "\(Self.dayFmt.string(from: d.day)): \(Fmt.compact(d.total)) tokens ("
+            + parts.joined(separator: " · ") + ")"
+            + (chartIncludeCache ? " · incl. cache" : "")
+    }
+
+    /// "Claude 87.0M (269k fresh + 86.7M cache)" — the fresh/cache split lives
+    /// here rather than in the bar because cache routinely dwarfs fresh by ~70:1;
+    /// text resolves that ratio, a 42pt lane with a 1.5pt segment floor does not.
+    /// Local runtimes have no prompt cache, so they stay a bare total.
+    private func originHelpPart(_ o: UsageOrigin, _ d: DayStat) -> String {
+        let plotted = d.providers[o, default: 0]
+        let cache = d.cache(o)
+        let name = o.displayName
+        guard chartIncludeCache, cache > 0 else { return "\(name) \(Fmt.compact(plotted))" }
+        let fresh = d.fresh(o, includeCache: chartIncludeCache)
+        return "\(name) \(Fmt.compact(plotted)) (\(Fmt.compact(fresh)) fresh + \(Fmt.compact(cache)) cache)"
     }
 
     private func leadingEdgeLabel(_ bars: [DayStat]) -> String {
@@ -1677,7 +1736,7 @@ struct MenuView: View {
         return RoundedRectangle(cornerRadius: 3)
             .fill(future ? Color.clear : heatColor(d, maxV))
             .frame(width: 13, height: 13)
-            .help(future ? "" : "\(Self.dayFmt.string(from: d.day)): \(Fmt.compact(d.total)) tokens (Claude \(Fmt.compact(d.claude)) · Codex \(Fmt.compact(d.codex)) · Ollama \(Fmt.compact(d.ollama)) · LM Studio \(Fmt.compact(d.lmStudio)))\(chartIncludeCache ? " · incl. cache" : "")")
+            .help(future ? "" : heatmapHelp(d))
     }
 
     private func heatColor(_ d: DayStat, _ maxV: Int) -> Color {
@@ -1717,6 +1776,7 @@ struct MenuView: View {
             menuBarGroup
             usageChartGroup
             providerColorsGroup
+            frontPageProvidersGroup
             showSectionsGroup
 
             clusterHeader("Notifications")
@@ -2034,6 +2094,24 @@ struct MenuView: View {
                                                lineWidth: selected ? 2 : 0.5))
         }
         .buttonStyle(.plain).help(hex)
+    }
+
+    private var frontPageProvidersGroup: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            sectionTitle("Show on front page")
+            ForEach(UsageOrigin.allCases, id: \.rawValue) { o in
+                Toggle(isOn: Binding(get: { !isOriginHidden(o) }, set: { _ in toggleOriginHidden(o) })) {
+                    HStack(spacing: 5) {
+                        BrandMarkView(origin: o, size: 11)
+                        Text(frontPageLabel(o)).font(.system(size: 11.5))
+                    }
+                }
+            }
+            Text("Runtimes with no usage in the selected period are hidden regardless. The headline total always counts every runtime.")
+                .font(.system(size: 9.5)).foregroundStyle(.tertiary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .toggleStyle(.checkbox).controlSize(.small)
     }
 
     private var showSectionsGroup: some View {

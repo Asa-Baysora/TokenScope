@@ -191,7 +191,18 @@ this is the green dot in the Sessions list).
 `days` → `1`, `7`, `30`.
 
 ### `DayStat` (in-memory chart/heatmap bucket)
-`day: Date` + `claude, codex, ollama, lmStudio` ints; `total` = their sum.
+`day: Date` + `providers: [UsageOrigin: Int]` (accessors `claude, codex, ollama,
+lmStudio`); `total` = their sum. `providers` holds what the chart **plots** — fresh
+in+out, plus cache when `ChartIncludeCache` is on — so every geometry consumer reads
+it directly and does no arithmetic.
+- `cached: [UsageOrigin: Int]` carries the cache portion **always**, regardless of the
+  toggle, and `cache(_:)` / `fresh(_:includeCache:)` derive the split. `fresh`
+  subtracts cache back out only when the toggle folded it in, and clamps at 0.
+- **Why the split is data and not geometry:** cache routinely runs >98% of the total,
+  so a fresh segment is sub-point in the 42pt lane and `stackedSegments`' 1.5pt floor
+  would inflate it several-fold while clawing the difference out of the cache segment.
+  The split is therefore reported in the hover tooltips, where text resolves the ratio
+  honestly, and the bars keep one shade per provider.
 
 ### `DayAgg` (persisted frozen day) — `Codable, Equatable`
 Provider-keyed `ProviderDayAgg` values (input/output/cache/reasoning/calls). The
@@ -554,6 +565,9 @@ Exactly one copy is counted:
 - `hourlyTotals(includeCache:)` — today bucketed into 24 hour slots.
 - `heatmapDays(weeks:includeCache:)` — `weeks*7` consecutive days: live-window events
   **plus** frozen `history` for each day (using `*WithCache` when cache is on).
+- All three producers also fill `DayStat.cached` unconditionally — from the event's
+  `cacheReadTokens + cacheCreationTokens`, or from `*WithCache - *` for frozen history
+  days — so the tooltips report the split in either toggle state.
 - `sessionTitle(for:sample:)` — proxy → `"Ollama (direct)"`; desktop metadata →
   `"Ollama Desktop"`; else the transcript
   title; LM Studio → `"LM Studio · <model>"`; Codex → `"Codex · <project>"` or
@@ -665,7 +679,13 @@ use a 150 ms ease-in-out animation and become immediate with Reduce Motion.
 - Default resting facet. Plain-SwiftUI Today / 7 Days / 30 Days selector.
 - Large monospaced headline = fresh input/output plus cache when the cache preference
   is enabled. Cost is intentionally absent until a real pricing table exists.
-- Compact Claude Code and Codex provider bars lead to a provider/model detail facet.
+- Compact provider bars lead to a provider/model detail facet. The set is
+  **data-driven**: every origin enabled in Settings that has usage in the period, so
+  Ollama and LM Studio appear alongside Claude Code and Codex. `splitMax` spans the
+  displayed set, and because the headline counts every origin the bars now reconcile
+  with it. (They previously could not: the pair was hardcoded while the headline
+  summed all four.) Origins with no usage in the period are omitted rather than
+  holding an empty bar open, matching `providerTotalChip`'s `calls > 0` rule.
 - **Tokens over time** chart with a **Bars / Line** toggle (`UsageChartMode`, default
   **bar**): per-**hour** for Today and per-**day** otherwise; `· incl. cache` in the
   facet header when `ChartIncludeCache` is on.
@@ -809,6 +829,7 @@ View-bound; the rest are read directly.
 | `ChartIncludeCache` | Bool | `true` | include cache tokens in chart & heatmap |
 | `CollapsedSections` | String (CSV) | `""` | collapsed section ids |
 | `HiddenSections` | String (CSV) | `""` | hidden section ids |
+| `HiddenFrontPageOrigins` | String (CSV) | `""` | origins switched off for the front-page split (`Settings → Usage chart → Show on front page`); the headline total still counts every origin |
 | `MenuBarItems` | String (CSV) | `tokens` | menu-bar gauges/count: `session,weekly,chatgptPrimary,chatgptSecondary,tokens` |
 | `SessionOriginFilter` | String | `all` | Sessions-list provider filter |
 
