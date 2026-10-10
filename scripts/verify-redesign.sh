@@ -22,7 +22,7 @@ swiftc Sources/TokenScope/Models.swift \
   -o "$cache_root/model-checks"
 "$cache_root/model-checks"
 
-print "Checkpoint 3/5: protocol and LM Studio regressions"
+print "Checkpoint 3/5: protocol, LM Studio and Claude transcript-root regressions"
 swiftc Sources/TokenScope/Models.swift \
   Sources/TokenScope/HTTPRequestScanner.swift \
   Sources/TokenScope/HTTPIdentityEncodingRewriter.swift \

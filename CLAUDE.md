@@ -185,5 +185,5 @@ Idle CPU must stay near zero. Measured regressions that were fixed; don't undo:
   own persisted watermark drives the one-time ≤366-day history backfill.
 - `~/Library/Logs/TokenScope.log` — lifecycle summaries and sanitized diagnostics;
   first place to look when verifying behavior. Per-event logging is deliberately off.
-- Ports via `defaults write com.tokenscope ProxyPort|OllamaPort -int N`
+- `defaults write com.tokenscope ExtraClaudeProjectDirs -array "<dir>/projects"` adds Claude Code transcript roots (CLAUDE_CONFIG_DIR sessions); ports via `defaults write com.tokenscope ProxyPort|OllamaPort -int N`
   (defaults 11435 → 11434).

@@ -848,7 +848,7 @@ View-bound; the rest are read directly.
 |---|---|---|---|
 | `ProxyPort` | Int | `11435` | proxy listen port |
 | `OllamaPort` | Int | `11434` | Ollama upstream port |
-| `ExtraClaudeProjectDirs` | [String] | `[]` | extra Claude Code transcript roots (absolute, `~` ok) for `CLAUDE_CONFIG_DIR` sessions (`<dir>/projects`); additive to `~/.claude/projects`, deduped after `~`/path standardisation, missing dirs skipped and re-checked on the 10 s full walk. e.g. `defaults write com.tokenscope ExtraClaudeProjectDirs -array "~/Projects/local-llm-subagents/lean-config/projects"` |
+| `ExtraClaudeProjectDirs` | [String] | `[]` | extra Claude Code transcript roots (absolute, `~` ok) for `CLAUDE_CONFIG_DIR` sessions (`<dir>/projects`); additive to `~/.claude/projects`, deduped after `~`/path standardisation, missing dirs skipped and re-checked on the 10 s full walk; entries are symlink-resolved, `<dir>` is mapped to `<dir>/projects` when that exists, `/` and `$HOME` are rejected. Restart TokenScope to import existing history from a newly added root; before restart only new activity is counted. History older than the 31-day window is never backfilled for roots added later. e.g. `defaults write com.tokenscope ExtraClaudeProjectDirs -array "~/Projects/local-llm-subagents/lean-config/projects"` |
 | `CodexSource` | String | `""` (auto) | `local` \| `cookie` \| `""` |
 | `CodexMonitoringEnabled` | Bool | `true` | local Codex scan on/off |
 | `claude_session_cookie` | String | — | claude.ai cookie (secret) |
@@ -884,7 +884,7 @@ View-bound; the rest are read directly.
   limits, status, folds/backfills). **Not** per-event (that produced a 17 MB log). One
   file handle held open, serialized on a dedicated queue. First place to look when
   verifying behavior.
-- **Read-only inputs:** `~/.claude/projects/**/*.jsonl`, `~/.codex/sessions/**/*.jsonl`,
+- **Read-only inputs:** `~/.claude/projects/**/*.jsonl` (+ `ExtraClaudeProjectDirs` roots), `~/.codex/sessions/**/*.jsonl`,
   `~/.lmstudio/bin/lms` (spawned). Codex raw logs are never modified.
 
 ---

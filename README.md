@@ -10,7 +10,7 @@ service status.
 Token usage and local-runtime activity come from four collector families,
 reconciled automatically:
 
-1. **Claude Code transcripts** (`~/.claude/projects/**/*.jsonl`). Every API response
+1. **Claude Code transcripts** (`~/.claude/projects/**/*.jsonl`, plus any `ExtraClaudeProjectDirs` roots for `CLAUDE_CONFIG_DIR` sessions). Every API response
    Claude Code receives is logged there with exact `usage` counts (input, output,
    cache read, cache write), the session ID, and the project directory. TokenScope
    tails these files once a second. This covers native Anthropic usage *and* Claude
@@ -176,7 +176,7 @@ defaults write com.tokenscope OllamaPort -int 11434
 Claude Code sessions launched with `CLAUDE_CONFIG_DIR=<dir>` write transcripts to
 `<dir>/projects` instead of `~/.claude/projects`. Add those roots (absolute paths, `~`
 allowed; additive to the default root; missing directories are skipped and re-checked
-every ~10 s):
+every ~10 s). Restart TokenScope to import existing history from a newly added root; before restart only new activity is counted. History older than the 31-day window is never backfilled for roots added later.
 
 ```sh
 defaults write com.tokenscope ExtraClaudeProjectDirs -array "~/Projects/local-llm-subagents/lean-config/projects"

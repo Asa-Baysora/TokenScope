@@ -15,7 +15,7 @@ struct RootChecks {
         try fm.createDirectory(at: home.appendingPathComponent(".claude/projects"), withIntermediateDirectories: true)
         try fm.createDirectory(at: home.appendingPathComponent("lean/projects"), withIntermediateDirectories: true)
         defer { try? fm.removeItem(at: tmp) }
-        let h = home.standardizedFileURL.path
+        let h = home.resolvingSymlinksInPath().path
 
         let none = ClaudeProjectRoots.resolve(extra: [], home: home).map(\.path)
         expect(none == ["\(h)/.claude/projects"], "default root only when no extras")
@@ -37,6 +37,29 @@ struct RootChecks {
         let later = ClaudeProjectRoots.existing(
             extra: ["\(h)/missing/projects"], home: home).map(\.path)
         expect(later.contains("\(h)/missing/projects"), "dir created later is picked up")
+
+        // symlinked root (last component a symlink) resolves to its target
+        try fm.createDirectory(at: tmp.appendingPathComponent("real/projects"), withIntermediateDirectories: true)
+        let link = tmp.appendingPathComponent("linkroot")
+        try fm.createSymbolicLink(at: link, withDestinationURL: tmp.appendingPathComponent("real/projects"))
+        let sym = ClaudeProjectRoots.existing(extra: [link.path], home: home).map(\.path)
+        expect(sym.contains(tmp.resolvingSymlinksInPath().path + "/real/projects"), "symlinked root resolved: \(sym)")
+
+        // config dir given instead of its projects subdir -> <dir>/projects
+        let cfg = ClaudeProjectRoots.resolve(extra: ["\(h)/lean"], home: home).map(\.path)
+        expect(cfg == ["\(h)/.claude/projects", "\(h)/lean/projects"], "config dir maps to projects: \(cfg)")
+        let nosub = ClaudeProjectRoots.resolve(extra: ["\(h)/plain"], home: home).map(\.path)
+        expect(nosub.last == "\(h)/plain", "entry without projects subdir kept as-is: \(nosub)")
+
+        // broad roots rejected
+        let broad = ClaudeProjectRoots.resolveDetailed(extra: ["/", h, "\(h)/"], home: home)
+        expect(broad.roots.map(\.path) == ["\(h)/.claude/projects"] && broad.rejected.count == 3,
+               "/ and $HOME rejected: \(broad)")
+
+        // tolerant parsing
+        expect(ClaudeProjectRoots.entries(from: " /a \n") == ["/a"], "bare string, trimmed")
+        expect(ClaudeProjectRoots.entries(from: ["/a", 3, "", " /b "] as [Any]) == ["/a", "/b"], "array, non-strings dropped")
+        expect(ClaudeProjectRoots.entries(from: nil).isEmpty && ClaudeProjectRoots.entries(from: 5).isEmpty, "nil/other ignored")
 
         print("claude-roots checks passed")
     }
