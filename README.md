@@ -173,6 +173,15 @@ defaults write com.tokenscope ProxyPort -int 11435
 defaults write com.tokenscope OllamaPort -int 11434
 ```
 
+Claude Code sessions launched with `CLAUDE_CONFIG_DIR=<dir>` write transcripts to
+`<dir>/projects` instead of `~/.claude/projects`. Add those roots (absolute paths, `~`
+allowed; additive to the default root; missing directories are skipped and re-checked
+every ~10 s):
+
+```sh
+defaults write com.tokenscope ExtraClaudeProjectDirs -array "~/Projects/local-llm-subagents/lean-config/projects"
+```
+
 Lifecycle summaries and sanitized diagnostics are appended to
 `~/Library/Logs/TokenScope.log`; prompt/reply content and raw provider errors are not.
 

@@ -226,7 +226,9 @@ how it feeds the store → privacy → limitations.** Source file named in the h
 
 ### 6.1 Claude Code transcripts — `TranscriptWatcher.swift`
 
-- **Reads:** `~/.claude/projects/<project>/<session>.jsonl`. Every API response Claude
+- **Reads:** `~/.claude/projects/<project>/<session>.jsonl` plus any
+  `ExtraClaudeProjectDirs` roots (`ClaudeProjectRoots.swift`; for `CLAUDE_CONFIG_DIR`
+  sessions) via one enumeration loop, re-resolved on each full walk. Every API response Claude
   Code receives is appended here with exact usage. Covers **native Anthropic and
   Claude Code → Ollama** with no configuration.
 - **Poll discipline:** a `DispatchSourceTimer`, `deadline: .now()+3.0, repeating: 1.0`
@@ -846,6 +848,7 @@ View-bound; the rest are read directly.
 |---|---|---|---|
 | `ProxyPort` | Int | `11435` | proxy listen port |
 | `OllamaPort` | Int | `11434` | Ollama upstream port |
+| `ExtraClaudeProjectDirs` | [String] | `[]` | extra Claude Code transcript roots (absolute, `~` ok) for `CLAUDE_CONFIG_DIR` sessions (`<dir>/projects`); additive to `~/.claude/projects`, deduped after `~`/path standardisation, missing dirs skipped and re-checked on the 10 s full walk. e.g. `defaults write com.tokenscope ExtraClaudeProjectDirs -array "~/Projects/local-llm-subagents/lean-config/projects"` |
 | `CodexSource` | String | `""` (auto) | `local` \| `cookie` \| `""` |
 | `CodexMonitoringEnabled` | Bool | `true` | local Codex scan on/off |
 | `claude_session_cookie` | String | — | claude.ai cookie (secret) |

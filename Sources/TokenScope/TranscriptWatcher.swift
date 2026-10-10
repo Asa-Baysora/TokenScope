@@ -1,12 +1,12 @@
 import Foundation
 
-/// Tails Claude Code session transcripts (~/.claude/projects/**/*.jsonl) and turns
+/// Tails Claude Code session transcripts (~/.claude/projects/**/*.jsonl, plus any
+/// `ExtraClaudeProjectDirs` roots for CLAUDE_CONFIG_DIR sessions) and turns
 /// every assistant message's `usage` block into a UsageEvent. Covers native Claude
 /// and Claude Code pointed at Ollama alike, with exact per-call token counts.
 final class TranscriptWatcher {
     private let store: UsageStore
-    private let root = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent(".claude/projects")
+    private let home = FileManager.default.homeDirectoryForCurrentUser
     private let queue = DispatchQueue(label: "tokenscope.transcripts", qos: .utility)
     private var timer: DispatchSourceTimer?
     private var offsets: [String: UInt64] = [:]
@@ -79,14 +79,21 @@ final class TranscriptWatcher {
         FileLog.log("transcript watcher started; reading \(read) files (events since \(UsageStore.dayKey(cutoff)), backfill from \(UsageStore.dayKey(backfillFrom)))")
     }
 
+    /// Roots are re-resolved on every walk (cheap: one defaults read + a few stats),
+    /// so a root created later, or a changed default, is picked up on the next
+    /// full walk. Missing roots are skipped silently.
     private func jsonlFiles() -> [URL] {
-        guard let en = FileManager.default.enumerator(
-            at: root,
-            includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey],
-            options: [.skipsHiddenFiles]) else { return [] }
+        let extra = UserDefaults.standard.stringArray(forKey: ClaudeProjectRoots.defaultsKey) ?? []
         var out: [URL] = []
-        for case let u as URL in en where u.pathExtension == "jsonl" {
-            out.append(u)
+        var seen = Set<String>()
+        for root in ClaudeProjectRoots.existing(extra: extra, home: home) {
+            guard let en = FileManager.default.enumerator(
+                at: root,
+                includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey],
+                options: [.skipsHiddenFiles]) else { continue }
+            for case let u as URL in en where u.pathExtension == "jsonl" {
+                if seen.insert(u.path).inserted { out.append(u) }  // nested roots
+            }
         }
         return out
     }

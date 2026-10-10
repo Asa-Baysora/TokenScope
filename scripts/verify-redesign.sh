@@ -36,6 +36,11 @@ swiftc Sources/TokenScope/Models.swift \
   Sources/TokenScope/LMStudioEventParser.swift \
   tools/verify-lmstudio.swift \
   -o "$cache_root/lmstudio-checks"
+
+swiftc Sources/TokenScope/ClaudeProjectRoots.swift \
+  tools/verify-claude-roots.swift \
+  -o "$cache_root/roots-checks"
+"$cache_root/roots-checks"
 "$cache_root/lmstudio-checks"
 
 if [[ "${CLI_ONLY:-0}" == "1" ]]; then
