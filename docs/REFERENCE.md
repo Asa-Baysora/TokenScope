@@ -5,7 +5,7 @@
 > *without reading the Swift source*. Where a fact is load-bearing, the file and the
 > exact value are named so you can jump to it.
 >
-> **Reflects:** v0.1.5 (`CFBundleVersion` 6), 2026-07-17.
+> **Reflects:** v0.1.7 (`CFBundleVersion` 7), 2026-10-10.
 > When you change behavior, update this file in the same commit.
 >
 > **Companion docs:** `CLAUDE.md` is the always-loaded working checklist for coding
@@ -899,7 +899,7 @@ swift build -c release            # compile
 ```
 
 `build-app.sh` writes the `Info.plist` (bundle id `com.tokenscope`,
-`CFBundleShortVersionString` = 0.1.5, `CFBundleVersion` = 6, `LSUIElement true`),
+`CFBundleShortVersionString` = 0.1.7, `CFBundleVersion` = 7, `LSUIElement true`),
 generates the icon from `tools/make-icon.swift` if missing, and `codesign --force
 --sign -` (ad-hoc). `Package.swift` is a single executable target, no dependencies.
 
