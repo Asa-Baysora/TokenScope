@@ -1,12 +1,12 @@
 import Foundation
 
-/// Tails Claude Code session transcripts (~/.claude/projects/**/*.jsonl) and turns
+/// Tails Claude Code session transcripts (~/.claude/projects/**/*.jsonl, plus any
+/// `ExtraClaudeProjectDirs` roots for CLAUDE_CONFIG_DIR sessions) and turns
 /// every assistant message's `usage` block into a UsageEvent. Covers native Claude
 /// and Claude Code pointed at Ollama alike, with exact per-call token counts.
 final class TranscriptWatcher {
     private let store: UsageStore
-    private let root = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent(".claude/projects")
+    private let home = FileManager.default.homeDirectoryForCurrentUser
     private let queue = DispatchQueue(label: "tokenscope.transcripts", qos: .utility)
     private var timer: DispatchSourceTimer?
     private var offsets: [String: UInt64] = [:]
@@ -67,6 +67,7 @@ final class TranscriptWatcher {
         backfillFrom = max(store.historyCompleteThrough, ancient)
         backfilling = backfillFrom < cutoff
         var read = 0
+        refreshRoots(seed: false)
         for u in jsonlFiles() {
             let vals = try? u.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey])
             let mtime = vals?.contentModificationDate ?? .distantPast
@@ -79,14 +80,55 @@ final class TranscriptWatcher {
         FileLog.log("transcript watcher started; reading \(read) files (events since \(UsageStore.dayKey(cutoff)), backfill from \(UsageStore.dayKey(backfillFrom)))")
     }
 
-    private func jsonlFiles() -> [URL] {
+    private var roots: [URL] = []
+    private var knownRoots: Set<String> = []
+    private var rootsSignature = ""
+
+    private func enumerate(_ root: URL) -> [URL] {
         guard let en = FileManager.default.enumerator(
             at: root,
             includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey],
             options: [.skipsHiddenFiles]) else { return [] }
         var out: [URL] = []
-        for case let u as URL in en where u.pathExtension == "jsonl" {
-            out.append(u)
+        for case let u as URL in en where u.pathExtension == "jsonl" { out.append(u) }
+        return out
+    }
+
+    /// Re-resolves the roots (one defaults read + a few stats; called at bootstrap
+    /// and on each full walk, so a root created later is picked up). A root that
+    /// was not present at bootstrap has its existing files seeded to EOF: only new
+    /// activity is counted until restart, so history is never replayed at runtime
+    /// (that would double-count against proxy events). Logs the root set once per
+    /// change.
+    private func refreshRoots(seed: Bool) {
+        let d = UserDefaults.standard.object(forKey: ClaudeProjectRoots.defaultsKey)
+        let r = ClaudeProjectRoots.resolveDetailed(
+            extra: ClaudeProjectRoots.entries(from: d), home: home)
+        let existing = ClaudeProjectRoots.existing(extra: ClaudeProjectRoots.entries(from: d), home: home)
+        let paths = Set(existing.map(\.path))
+        if seed {
+            for root in existing where !knownRoots.contains(root.path) {
+                for u in enumerate(root) where offsets[u.path] == nil {
+                    offsets[u.path] = UInt64(((try? u.resourceValues(forKeys: [.fileSizeKey]))?.fileSize) ?? 0)
+                }
+            }
+        }
+        knownRoots = paths
+        roots = existing
+        let sig = existing.map(\.path).joined(separator: "|") + "#" + r.rejected.joined(separator: "|")
+        if sig != rootsSignature {
+            rootsSignature = sig
+            var msg = "claude transcript roots: " + existing.map(\.path).joined(separator: ", ")
+            if !r.rejected.isEmpty { msg += " (rejected: \(r.rejected.joined(separator: ", ")))" }
+            FileLog.log(msg)
+        }
+    }
+
+    private func jsonlFiles() -> [URL] {
+        var out: [URL] = []
+        var seen = Set<String>()
+        for root in roots {
+            for u in enumerate(root) where seen.insert(u.path).inserted { out.append(u) }  // nested roots
         }
         return out
     }
@@ -111,6 +153,7 @@ final class TranscriptWatcher {
     }
 
     private func fullScan() {
+        refreshRoots(seed: true)
         let hotCutoff = Date().addingTimeInterval(-Self.hotWindow)
         var active: Set<String> = []
         for u in jsonlFiles() {

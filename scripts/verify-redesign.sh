@@ -22,7 +22,7 @@ swiftc Sources/TokenScope/Models.swift \
   -o "$cache_root/model-checks"
 "$cache_root/model-checks"
 
-print "Checkpoint 3/5: protocol and LM Studio regressions"
+print "Checkpoint 3/5: protocol, LM Studio and Claude transcript-root regressions"
 swiftc Sources/TokenScope/Models.swift \
   Sources/TokenScope/HTTPRequestScanner.swift \
   Sources/TokenScope/HTTPIdentityEncodingRewriter.swift \
@@ -36,6 +36,11 @@ swiftc Sources/TokenScope/Models.swift \
   Sources/TokenScope/LMStudioEventParser.swift \
   tools/verify-lmstudio.swift \
   -o "$cache_root/lmstudio-checks"
+
+swiftc Sources/TokenScope/ClaudeProjectRoots.swift \
+  tools/verify-claude-roots.swift \
+  -o "$cache_root/roots-checks"
+"$cache_root/roots-checks"
 "$cache_root/lmstudio-checks"
 
 if [[ "${CLI_ONLY:-0}" == "1" ]]; then
