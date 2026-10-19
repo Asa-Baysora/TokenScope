@@ -263,7 +263,7 @@ how it feeds the store → privacy → limitations.** Source file named in the h
 
 ### 6.2 Codex session telemetry — `CodexTranscriptWatcher.swift`
 
-- **Reads:** `~/.codex/sessions/YYYY/MM/DD/*.jsonl`. Same complete-line + hot-file
+- **Reads:** `~/.codex/sessions/YYYY/MM/DD/*.jsonl` **and** `~/.codex/archived_sessions/*.jsonl`. Same complete-line + hot-file
   polling as above (`deadline: .now()+3, repeating: 1` → **1 s**).
 - **Byte pre-filters:** `"token_count"` (`tokenCountMarker`), `"session_meta"`
   (`sessionMetaMarker`), and a `turn_context` marker. Only lines matching are decoded.
@@ -274,12 +274,15 @@ how it feeds the store → privacy → limitations.** Source file named in the h
     latest model per file).
   - `event_msg` with `payload.type == "token_count"` → the usage event, taken from
     `payload.info.last_token_usage` (input, cached input, output, reasoning output).
-    Cached and reasoning counts are retained as detail, **not** double-added to the
-    headline. `payload.rate_limits.{primary,secondary}` → the observed Codex quota
+    `cached_input_tokens` is a **subset** of `input_tokens` (OpenAI semantics), so Codex
+    stores `inputTokens = input − cached` and `cacheReadTokens = cached`; cache-inclusive
+    totals then equal raw input + output once. A record whose `total_token_usage` equals
+    the previous one in the same file is skipped (`CodexHistory.DuplicateGate`). `payload.rate_limits.{primary,secondary}` → the observed Codex quota
     windows, forwarded to `OpenAILimitsManager.observe(...)`.
 - **Ground truth:** `last_token_usage` — exact local counts.
 - **Feeds store:** as `provider = .codex, source = .codexTranscript`; deduped by
-  source-file byte offset. Has its **own persisted watermark**
+  `codex:<rollout file-name stem>:<timestamp>:<total in/out>` — path-independent, so a
+  rollout moving sessions/ → archived_sessions/ never double-counts. Has its **own persisted watermark**
   (`codexHistoryCompleteThrough`) because the Codex log tree is independent of the
   Claude transcript tree; backfills ≤366 days of daily history exactly once, matching
   Claude's launch behavior. Both sources still merge into the *same* day aggregate.
@@ -519,6 +522,16 @@ provider-owned `loadedModels`, `runtimeHealth`, `history: [String: DayAgg]` (key
   `(completeThrough, cutoff)` (≤366 days) and calls `mergeHistorical` /
   `mergeCodexHistorical`. Deleting `daily-history.json` triggers a fresh one-time
   backfill on next launch.
+- **Watermarks are per provider.** `fold()` advances `historyCompleteThrough` and, when
+  Codex events folded, `codexHistoryCompleteThrough` (clamped to `eventsCutoff`). Missing
+  the Codex advance re-reads folded days next launch and doubles them. The watcher reads
+  the watermark via `store.codexWatermark()` (main-queue FIFO with the merge write) so a
+  replay cannot backfill twice. Logic lives in `CodexHistory.swift`
+  (checks: `tools/verify-codex.swift`).
+- **History schema.** `daily-history.json` carries `schema` (now 2). Loading a file
+  with schema < 2 strips the `codex` provider from every day (recomputing `calls`),
+  resets only the Codex watermark, and saves — once; the backfill rebuilds Codex from
+  the rollout files.
 
 ### 7.4 Double-count prevention (shadowing)
 A Claude Code call routed through the proxy is observed **twice** (proxy + transcript).
@@ -550,7 +563,7 @@ Exactly one copy is counted:
 
 ### 7.5 Dedup
 - Claude Code transcript events: **`message.id:requestId`**, strongest observation wins.
-- Codex events: by source-file **byte offset**.
+- Codex events: `codex:<rollout stem>:<timestamp>:<total in/out>` (NOT file path/offset).
 - LM Studio: prediction id when present, else
   `"lmstudio:<ts>:<prompt>:<predicted>:<model>"`.
 - `eventIDByDedupKey` plus `EventReconciler` upgrades an existing record in place.

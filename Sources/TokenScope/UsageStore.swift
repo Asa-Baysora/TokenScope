@@ -55,6 +55,7 @@ final class UsageStore: ObservableObject {
     private struct HistoryFile: Codable {
         var completeThrough: Double
         var codexCompleteThrough: Double?
+        var schema: Int?
         var days: [String: DayAgg]
     }
 
@@ -305,6 +306,14 @@ final class UsageStore: ObservableObject {
         }
     }
 
+    /// Thread-safe read of the Codex watermark. Writers update it on main, so
+    /// reading through main (FIFO) orders a bootstrap after any earlier merge
+    /// and prevents a replay from re-running a backfill that just finished.
+    func codexWatermark() -> Date {
+        Thread.isMainThread ? codexHistoryCompleteThrough
+            : DispatchQueue.main.sync { codexHistoryCompleteThrough }
+    }
+
     /// Codex uses its own watermark because the source log lives outside the
     /// Claude transcript tree. Both sources still merge into one day aggregate.
     func mergeCodexHistorical(_ batch: [String: DayAgg], coverThrough: Date) {
@@ -412,7 +421,11 @@ final class UsageStore: ObservableObject {
             d.add(e)
             history[k] = d
         }
+        let foldedCodex = removed.contains { !$0.shadowed && $0.provider == .codex }
         historyCompleteThrough = max(historyCompleteThrough, through)
+        codexHistoryCompleteThrough = CodexHistory.advancedCodexWatermark(
+            current: codexHistoryCompleteThrough, through: through,
+            cutoff: eventsCutoff, foldedCodex: foldedCodex)
         saveHistory()
         FileLog.log("folded \(removed.count) aged-out events into daily history")
     }
@@ -426,6 +439,15 @@ final class UsageStore: ObservableObject {
         historyCompleteThrough = Date(timeIntervalSince1970: f.completeThrough)
         codexHistoryCompleteThrough = f.codexCompleteThrough.map(Date.init(timeIntervalSince1970:))
             ?? Date(timeIntervalSince1970: 0)
+        // One-time repair: pre-v2 history could hold doubled Codex days (fold()
+        // never advanced the Codex watermark, so the next backfill re-added them).
+        // Strip Codex and reset only its watermark; the backfill rebuilds it.
+        if (f.schema ?? 1) < CodexHistory.historySchema {
+            history = CodexHistory.stripCodex(f.days)
+            codexHistoryCompleteThrough = Date(timeIntervalSince1970: 0)
+            FileLog.log("history schema \(f.schema ?? 1) -> \(CodexHistory.historySchema): stripped Codex days, rebuilding from rollout files")
+            saveHistory()
+        }
         FileLog.log("loaded daily history: \(f.days.count) days, Claude through \(Self.dayKey(historyCompleteThrough)), Codex through \(Self.dayKey(codexHistoryCompleteThrough))")
     }
 
@@ -433,6 +455,7 @@ final class UsageStore: ObservableObject {
         let f = HistoryFile(
             completeThrough: historyCompleteThrough.timeIntervalSince1970,
             codexCompleteThrough: codexHistoryCompleteThrough.timeIntervalSince1970,
+            schema: CodexHistory.historySchema,
             days: history)
         guard let data = try? JSONEncoder().encode(f) else { return }
         ioQueue.async {

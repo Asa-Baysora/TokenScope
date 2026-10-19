@@ -31,6 +31,7 @@ swiftc Sources/TokenScope/Models.swift Sources/TokenScope/LimitRailPresentation.
 swiftc Sources/TokenScope/Models.swift Sources/TokenScope/HTTPRequestScanner.swift Sources/TokenScope/HTTPIdentityEncodingRewriter.swift Sources/TokenScope/HTTPResponseFramer.swift Sources/TokenScope/ResponseScanner.swift tools/verify-protocols.swift -o /tmp/tokenscope-protocol-checks && /tmp/tokenscope-protocol-checks
 swiftc Sources/TokenScope/Models.swift Sources/TokenScope/LMStudioEventParser.swift tools/verify-lmstudio.swift -o /tmp/tokenscope-lmstudio-checks && /tmp/tokenscope-lmstudio-checks
 swiftc Sources/TokenScope/ClaudeProjectRoots.swift tools/verify-claude-roots.swift -o /tmp/tokenscope-roots-checks && /tmp/tokenscope-roots-checks
+swiftc Sources/TokenScope/Models.swift Sources/TokenScope/CodexHistory.swift tools/verify-codex.swift -o /tmp/tokenscope-codex-checks && /tmp/tokenscope-codex-checks
 
 # VERIFY UI BEFORE INSTALLING — render the menu with real data:
 .build/release/TokenScope --snapshot /tmp/menu.png
@@ -72,6 +73,12 @@ reason (`MenuView(snapshotInline: true)`).
 - **Transcript dedup** is `message.id:requestId`; `EventReconciler` keeps the
   strongest observation so a final rewrite upgrades a partial/zero record and a
   later stale replay cannot downgrade it.
+- **Codex accounting.** `fold()` must advance the Codex watermark too (else the next
+  backfill doubles folded days); backfill guards are per provider. Codex
+  `cached_input_tokens` ⊂ `input_tokens` → store input − cached. Dedup keys are
+  `rollout stem + timestamp + totals`, never file path (sessions/ ↔ archived_sessions/
+  moves); skip a `token_count` identical to the previous total. `daily-history.json`
+  `schema` < 2 triggers a one-time Codex strip + rebuild. Rules in `CodexHistory.swift`.
 - **Byte-level pre-filters** in `TranscriptWatcher.parse` (`"assistant"`,
   `"type":"summary"`, `"type":"user"` markers) keep the 30-day replay fast.
   Don't JSON-decode every line.

@@ -7,8 +7,13 @@ import Foundation
 final class CodexTranscriptWatcher {
     private let store: UsageStore
     private let limits: OpenAILimitsManager
-    private let root = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent(".codex/sessions")
+    // Live rollouts, plus rollouts Codex moves to archived_sessions/. Dedup keys
+    // are path-independent so a move between the two never double-counts.
+    private let roots: [URL] = {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        return [".codex/sessions", ".codex/archived_sessions"].map { home.appendingPathComponent($0) }
+    }()
+    private var duplicateGate = CodexHistory.DuplicateGate()
     private let queue = DispatchQueue(label: "tokenscope.codex-transcripts", qos: .utility)
     private var timer: DispatchSourceTimer?
     private var monitorObserver: NSObjectProtocol?
@@ -64,7 +69,7 @@ final class CodexTranscriptWatcher {
                 // A normal scan only tails new bytes. Refresh intentionally
                 // replays the current window so the latest saved quota record
                 // is re-observed even if Codex has been idle. Usage events are
-                // keyed by file byte offset, so this cannot double-count them.
+                // keyed by session + timestamp + totals, so this cannot double-count them.
                 self.offsets = [:]
                 self.activePaths = []
                 self.sessionMetadata = [:]
@@ -100,8 +105,8 @@ final class CodexTranscriptWatcher {
             return
         }
         // Replay the live window so the latest saved quota record is observed
-        // immediately after switching back to local limits. Dedup keys are file
-        // offsets, so local token events cannot be counted twice.
+        // immediately after switching back to local limits. Dedup keys are
+        // path-independent, so local token events cannot be counted twice.
         offsets = [:]
         activePaths = []
         sessionMetadata = [:]
@@ -119,8 +124,11 @@ final class CodexTranscriptWatcher {
     private func bootstrap() {
         let cutoff = store.eventsCutoff
         let ancient = Date().addingTimeInterval(-366 * 86400)
-        backfillFrom = max(store.codexHistoryCompleteThrough, ancient)
-        backfilling = backfillFrom < cutoff
+        let plan = CodexHistory.backfillPlan(
+            watermark: store.codexWatermark(), cutoff: cutoff, ancient: ancient)
+        backfillFrom = plan.from
+        backfilling = plan.active
+        duplicateGate.reset()
         backfillBatch = [:]
         backfillSeen = []
         var read = 0
@@ -144,12 +152,14 @@ final class CodexTranscriptWatcher {
     }
 
     private func jsonlFiles() -> [URL] {
-        guard let en = FileManager.default.enumerator(
-            at: root,
-            includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey],
-            options: [.skipsHiddenFiles]) else { return [] }
         var urls: [URL] = []
-        for case let url as URL in en where url.pathExtension == "jsonl" { urls.append(url) }
+        for root in roots {
+            guard let en = FileManager.default.enumerator(
+                at: root,
+                includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey],
+                options: [.skipsHiddenFiles]) else { continue }
+            for case let url as URL in en where url.pathExtension == "jsonl" { urls.append(url) }
+        }
         return urls
     }
 
@@ -265,9 +275,19 @@ final class CodexTranscriptWatcher {
                 primary: window(limits.primary), secondary: window(limits.secondary), at: timestamp)
         }
         guard let usage = line.payload?.info?.last_token_usage else { return }
-        let input = usage.input_tokens ?? 0
+        let total = line.payload?.info?.total_token_usage
+        let signature = total.map {
+            CodexHistory.Total(input: $0.input_tokens ?? 0, cached: $0.cached_input_tokens ?? 0,
+                               output: $0.output_tokens ?? 0, reasoning: $0.reasoning_output_tokens ?? 0)
+        }
+        // Codex re-emits identical token_count records; count each total once.
+        guard duplicateGate.shouldCount(stream: file.path, total: signature) else { return }
+        let cached = usage.cached_input_tokens ?? 0
+        // cached_input_tokens is a subset of input_tokens: store fresh input only,
+        // so input + cacheRead equals the raw input exactly once.
+        let input = CodexHistory.freshInput(input: usage.input_tokens ?? 0, cached: cached)
         let output = usage.output_tokens ?? 0
-        guard input > 0 || output > 0 else { return }
+        guard input > 0 || output > 0 || cached > 0 else { return }
         let event = UsageEvent(
             timestamp: timestamp,
             provider: .codex,
@@ -277,10 +297,16 @@ final class CodexTranscriptWatcher {
             projectName: sessionMetadata[file.path]?.project,
             inputTokens: input,
             outputTokens: output,
-            cacheReadTokens: usage.cached_input_tokens ?? 0,
+            cacheReadTokens: cached,
             cacheCreationTokens: 0,
             reasoningTokens: usage.reasoning_output_tokens ?? 0)
-        let key = "codex:\(file.path):\(offset)"
+        // File-name stem, not session_meta: tailing from EOF never sees the meta
+        // line, and a replay must produce the same key as a tail.
+        let sid = CodexHistory.sessionKey(fileName: file.lastPathComponent)
+        let key = CodexHistory.dedupKey(
+            sessionId: sid, timestamp: line.timestamp ?? "",
+            totalInput: signature?.input ?? usage.input_tokens ?? 0,
+            totalOutput: signature?.output ?? output)
         if timestamp >= liveCutoff {
             store.addTranscriptEvent(event, dedupKey: key)
         } else if backfilling, timestamp >= backfillFrom, backfillSeen.insert(key).inserted {
