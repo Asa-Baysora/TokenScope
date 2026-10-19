@@ -2,7 +2,7 @@ import Foundation
 import Combine
 
 final class UsageStore: ObservableObject {
-    static let retentionDays = 31   // a hair more than the longest display window
+    static let retentionDays = HistoryFold.retentionDays   // 28 whole days; see HistoryFold
 
     @Published private(set) var events: [UsageEvent] = []   // oldest → newest (sorted after replay)
     @Published private(set) var liveCalls: [LiveCall] = []
@@ -68,11 +68,7 @@ final class UsageStore: ObservableObject {
 
     /// Events-window boundary, aligned to whole days so a day is either entirely
     /// live (in `events`) or entirely frozen (in `history`) — never split.
-    var eventsCutoff: Date {
-        let cal = Calendar.current
-        return cal.date(byAdding: .day, value: -Self.retentionDays, to: cal.startOfDay(for: Date()))
-            ?? Date().addingTimeInterval(-Double(Self.retentionDays) * 86400)
-    }
+    var eventsCutoff: Date { HistoryFold.cutoff(now: Date()) }
 
     /// Proxy observations have no on-disk source of truth (transcripts do), so they
     /// are persisted here to survive restarts within the retention window.
@@ -97,8 +93,9 @@ final class UsageStore: ObservableObject {
         let u = d.integer(forKey: "OllamaPort")
         proxyPort = p > 0 ? UInt16(p) : 11435
         upstreamPort = u > 0 ? UInt16(u) : 11434
-        loadPersistedLocalEvents()
+        // History first: aged-out journal records fold into it during the journal load.
         loadHistory()
+        loadPersistedLocalEvents()
     }
 
     /// The clock timer only runs while calls are in flight — it drives the live
@@ -398,36 +395,26 @@ final class UsageStore: ObservableObject {
     }
 
     private func trim() {
-        let cutoff = eventsCutoff
-        if let first = events.first, first.timestamp < cutoff {
-            let removed = events.filter { $0.timestamp < cutoff }
-            events.removeAll { $0.timestamp < cutoff }
-            fold(removed, through: cutoff)
-        }
-        if events.count > 60_000 {
-            let removed = Array(events.prefix(events.count - 60_000))
-            events.removeFirst(events.count - 60_000)
-            fold(removed, through: removed.last?.timestamp ?? cutoff)
-        }
+        var w = HistoryFold.Window(
+            events: events, keyIDs: eventIDByDedupKey, history: history,
+            claudeThrough: historyCompleteThrough, codexThrough: codexHistoryCompleteThrough)
+        let before = events.count
+        guard before > 60_000 || (events.first.map { $0.timestamp < eventsCutoff } ?? false) else { return }
+        let r = HistoryFold.trim(&w, cutoff: eventsCutoff, dayKey: Self.dayKey)
+        guard r.folded > 0 else { return }
+        events = w.events
+        eventIDByDedupKey = w.keyIDs
+        history = w.history
+        historyCompleteThrough = w.claudeThrough
+        codexHistoryCompleteThrough = w.codexThrough
+        saveHistory()
+        logMaxMerges(r.conflicts)
+        FileLog.log("folded \(r.folded) aged-out events into daily history")
     }
 
-    /// Events leaving the live window are folded into the persistent daily history
-    /// so the heatmap keeps them after the raw events (and transcripts) are gone.
-    private func fold(_ removed: [UsageEvent], through: Date) {
-        guard !removed.isEmpty else { return }
-        for e in removed where !e.shadowed {
-            let k = Self.dayKey(e.timestamp)
-            var d = history[k] ?? DayAgg()
-            d.add(e)
-            history[k] = d
-        }
-        let foldedCodex = removed.contains { !$0.shadowed && $0.provider == .codex }
-        historyCompleteThrough = max(historyCompleteThrough, through)
-        codexHistoryCompleteThrough = CodexHistory.advancedCodexWatermark(
-            current: codexHistoryCompleteThrough, through: through,
-            cutoff: eventsCutoff, foldedCodex: foldedCodex)
-        saveHistory()
-        FileLog.log("folded \(removed.count) aged-out events into daily history")
+    private func logMaxMerges(_ conflicts: [String]) {
+        guard !conflicts.isEmpty else { return }
+        FileLog.log("fold: history already had \(conflicts.count) day/provider bucket(s) (\(conflicts.prefix(6).joined(separator: ", "))); merged by max, not summed")
     }
 
     // MARK: - Persistence (non-replayable local events; transcripts replay from disk)
@@ -483,13 +470,15 @@ final class UsageStore: ObservableObject {
             start = nl < data.endIndex ? data.index(after: nl) : data.endIndex
             guard !line.isEmpty,
                   let record = try? decoder.decode(PersistedLocalEvent.self, from: line),
-                  record.schema == 2, record.event.timestamp > cutoff else { continue }
+                  record.schema == 2 else { continue }
             if let existing = bestByKey[record.key] {
                 bestByKey[record.key] = EventReconciler.preferred(existing, record.event)
             } else {
                 bestByKey[record.key] = record.event
             }
         }
+        let split = foldAgedJournal(bestByKey, cutoff: cutoff)
+        bestByKey = split
         events = bestByKey.values.sorted { $0.timestamp < $1.timestamp }
         eventIDByDedupKey = Dictionary(uniqueKeysWithValues: bestByKey.map { ($0.key, $0.value.id) })
         rewriteLocalEventJournal(bestByKey)
@@ -508,7 +497,6 @@ final class UsageStore: ObservableObject {
             start = nl < data.endIndex ? data.index(after: nl) : data.endIndex
             guard !line.isEmpty, let pe = try? decoder.decode(PersistedProxyEvent.self, from: line) else { continue }
             let timestamp = Date(timeIntervalSince1970: pe.ts)
-            guard timestamp > cutoff else { continue }
             let event = UsageEvent(
                 timestamp: timestamp, provider: .ollama, source: .proxy,
                 model: pe.model, sessionId: "ollama-direct", projectName: nil,
@@ -520,10 +508,27 @@ final class UsageStore: ObservableObject {
             let key = "legacy-proxy:\(pe.ts):\(pe.model):\(pe.input):\(pe.output)"
             migrated[key] = event
         }
+        migrated = foldAgedJournal(migrated, cutoff: cutoff)
         events = migrated.values.sorted { $0.timestamp < $1.timestamp }
         eventIDByDedupKey = Dictionary(uniqueKeysWithValues: migrated.map { ($0.key, $0.value.id) })
         rewriteLocalEventJournal(migrated)
         FileLog.log("migrated \(migrated.count) legacy proxy events to schema v2")
+    }
+
+    /// Journaled local events (Ollama proxy/Desktop, LM Studio) that aged past the
+    /// cutoff while the app was closed are folded into history instead of being
+    /// dropped. The caller then rewrites the journal with only the live records
+    /// (history is saved first on the same serial queue), so they are not folded
+    /// again; if that rewrite is ever lost, the max-merge in fold() keeps a second
+    /// fold idempotent. Local providers have no watermark; nothing advances.
+    private func foldAgedJournal(_ records: [String: UsageEvent], cutoff: Date) -> [String: UsageEvent] {
+        let split = HistoryFold.partitionJournal(records, cutoff: cutoff)
+        guard !split.aged.isEmpty else { return split.live }
+        let conflicts = HistoryFold.fold(split.aged, into: &history, dayKey: Self.dayKey)
+        saveHistory()
+        logMaxMerges(conflicts)
+        FileLog.log("folded \(split.aged.count) journaled local events that aged out while closed into daily history")
+        return split.live
     }
 
     private func persistLocalEvent(_ event: UsageEvent, key: String) {

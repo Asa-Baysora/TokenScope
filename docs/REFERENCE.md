@@ -105,7 +105,7 @@ same figure.
   ollama run ───┤                                          ▼
   any client ───┴─► 127.0.0.1:11435 ─────────►  ┌──────────────────────┐
                     OllamaProxy (TCP relay)      │      UsageStore      │ ─► MenuView
-                      │            │             │  events (31 days)    │   (MenuBarExtra)
+                      │            │             │  events (28 days)    │   (MenuBarExtra)
                       ▼            ▼             │  history (forever)   │
                  127.0.0.1:11434  ResponseScanner ─► live + per-call    │
                     (Ollama)                     └──────────┬───────────┘
@@ -117,7 +117,7 @@ same figure.
   status.claude.com / status.openai.com ─► StatusManager ×2 ─► footer
 ```
 
-Everything funnels into **one `UsageStore`**, which owns the 31-day live event window,
+Everything funnels into **one `UsageStore`**, which owns the 28-day live event window,
 the permanent daily history, and all reconciliation. The UI is a pure function of the
 store plus the limit/status managers.
 
@@ -133,7 +133,7 @@ store plus the limit/status managers.
   `proxy`, `lmStudioLog`. Two sources can observe the same call (→ shadowing).
 - **Live call (`LiveCall`)** — an in-flight call the proxy is currently streaming;
   drives the `↓` counter. Only the proxy produces these.
-- **Events window** — the last **31 whole days** of raw `UsageEvent`s, kept in memory.
+- **Events window** — the last **28 whole days** of raw `UsageEvent`s, kept in memory.
 - **History (`DayAgg`)** — frozen per-day totals for days that have aged out of the
   window, persisted forever so the 6-month heatmap survives transcript deletion.
 - **Whole-day rule** — a calendar day is *entirely* live or *entirely* frozen, never
@@ -359,7 +359,7 @@ how it feeds the store → privacy → limitations.** Source file named in the h
 - **Source:** read-only access to `~/Library/Application Support/Ollama/db.sqlite`.
   The query selects only message row id, chat id, model, start/update timestamps, and
   streaming state. It never selects content, thinking, tool, or attachment columns.
-- **Wakeups/history:** startup replays only the live 31-day metadata window using
+- **Wakeups/history:** startup replays only the live 28-day metadata window using
   stable chat/row dedup keys. After that, vnode notifications on the SQLite DB/WAL
   trigger debounced reads; there is no idle polling loop.
 - **Accuracy boundary:** the desktop schema does not store `prompt_eval_count` or
@@ -526,16 +526,33 @@ provider-owned `loadedModels`, `runtimeHealth`, `history: [String: DayAgg]` (key
 `now`. Plus non-published watermarks `historyCompleteThrough`,
 `codexHistoryCompleteThrough`, and the resolved `proxyPort`/`upstreamPort`.
 
-### 7.2 The live window — 31 whole days
-- `retentionDays = 31` ("a hair more than the longest display window", 30d).
-- `eventsCutoff` = `startOfDay(now) − 31 days` — **aligned to a day boundary** so a
+### 7.2 The live window — 28 whole days
+- `HistoryFold.retentionDays = 28`. Claude Code deletes transcripts by mtime at about
+  30 days (`cleanupPeriodDays`), so a day still live in memory could already have lost
+  files and, replayed after a restart, be folded permanently short. 28 leaves margin.
+  (Was 31 until this change.)
+- `eventsCutoff` = `startOfDay(now) − 28 days` — **aligned to a day boundary** so a
   day is entirely live or entirely frozen. `trim()`, `fold()`, backfill, and time-based
   reconciliation all depend on this; **never** reintroduce a rolling timestamp cutoff.
-- Hard cap: if `events.count > 60_000`, the oldest overflow is folded out too.
+- Hard cap: if `events.count > 60_000`, the oldest overflow is folded out too. The
+  overflow fold advances **neither** watermark (it names a mid-window time) and removes
+  the folded events' dedup keys so a later line with the same key is not re-appended.
+- **Shrink 31 → 28 on upgrade.** The Claude watermark sits at the old (31-day) cutoff, so
+  the transcript backfill range `(watermark, new cutoff)` now covers the 3 days that left
+  the live window; they are aggregated into history once and the watermark advances.
+  Local journal records in that gap fold via 7.3 below.
+- All of this logic is pure in `HistoryFold.swift` (checks: `tools/verify-window.swift`).
 
 ### 7.3 Permanent history + backfill
-- Days leaving the window are **folded** into `history` (`fold()`), summing non-shadowed
-  events into `DayAgg`s, then `saveHistory()`.
+- Days leaving the window are **folded** into `history` (`HistoryFold.fold`), summing
+  non-shadowed events into `DayAgg`s, then `saveHistory()`. If history already holds that
+  day+provider (overflow fold replayed after restart, journal record already folded at
+  runtime) the fold **merges by max per field** instead of summing, and logs it.
+- **Local journal aging.** At load, journaled Ollama/Desktop/LM Studio records older than
+  the cutoff (aged out while the app was closed) are folded into history instead of
+  dropped, then the journal is rewritten with live records only. History is loaded first
+  and saved before the rewrite (same serial queue). Local providers have no watermark;
+  max-merge makes a repeated fold harmless if the rewrite is ever lost.
 - `history` persists to `daily-history.json` as
   `{completeThrough, codexCompleteThrough, days:{…}}`. This outlives Claude Code's own
   transcript cleanup — it is what lets the 6-month heatmap accumulate.
@@ -882,7 +899,7 @@ View-bound; the rest are read directly.
 |---|---|---|---|
 | `ProxyPort` | Int | `11435` | proxy listen port |
 | `OllamaPort` | Int | `11434` | Ollama upstream port |
-| `ExtraClaudeProjectDirs` | [String] | `[]` | extra Claude Code transcript roots (absolute, `~` ok) for `CLAUDE_CONFIG_DIR` sessions (`<dir>/projects`); additive to `~/.claude/projects`, deduped after `~`/path standardisation, missing dirs skipped and re-checked on the 10 s full walk; entries are symlink-resolved, `<dir>` is mapped to `<dir>/projects` when that exists, `/` and `$HOME` are rejected. Restart TokenScope to import existing history from a newly added root; before restart only new activity is counted. History older than the 31-day window is never backfilled for roots added later. e.g. `defaults write com.tokenscope ExtraClaudeProjectDirs -array "~/Projects/local-llm-subagents/lean-config/projects"` |
+| `ExtraClaudeProjectDirs` | [String] | `[]` | extra Claude Code transcript roots (absolute, `~` ok) for `CLAUDE_CONFIG_DIR` sessions (`<dir>/projects`); additive to `~/.claude/projects`, deduped after `~`/path standardisation, missing dirs skipped and re-checked on the 10 s full walk; entries are symlink-resolved, `<dir>` is mapped to `<dir>/projects` when that exists, `/` and `$HOME` are rejected. Restart TokenScope to import existing history from a newly added root; before restart only new activity is counted. History older than the 28-day window is never backfilled for roots added later. e.g. `defaults write com.tokenscope ExtraClaudeProjectDirs -array "~/Projects/local-llm-subagents/lean-config/projects"` |
 | `CodexSource` | String | `""` (auto) | `local` \| `cookie` \| `""` |
 | `CodexMonitoringEnabled` | Bool | `true` | local Codex scan on/off |
 | `claude_session_cookie` | String | — | claude.ai cookie (secret) |
@@ -1013,7 +1030,7 @@ the rationale lives here.
    per-bundle-id macOS state where the `MenuBarExtra` scene self-terminates ~1 s after
    launch (clean exit 0, no crash), surviving reboots and cache clears. This is *not* a
    code bug; the only fix was changing the id. Never revert it.
-2. **The events window is whole days.** Keep `eventsCutoff = startOfDay − 31d`; never a
+2. **The events window is whole days.** Keep `eventsCutoff = startOfDay − 28d`; never a
    rolling timestamp cutoff.
 3. **Shadowed events count nowhere** except the call log. Keep both runtime directions
    and the startup reconcile.

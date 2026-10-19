@@ -33,6 +33,7 @@ swiftc Sources/TokenScope/Models.swift Sources/TokenScope/LMStudioEventParser.sw
 swiftc Sources/TokenScope/ClaudeProjectRoots.swift tools/verify-claude-roots.swift -o /tmp/tokenscope-roots-checks && /tmp/tokenscope-roots-checks
 swiftc Sources/TokenScope/Models.swift Sources/TokenScope/CodexHistory.swift tools/verify-codex.swift -o /tmp/tokenscope-codex-checks && /tmp/tokenscope-codex-checks
 swiftc Sources/TokenScope/Models.swift Sources/TokenScope/EventReconciler.swift Sources/TokenScope/ClaudeTranscriptParser.swift tools/verify-transcript.swift -o /tmp/tokenscope-transcript-checks && /tmp/tokenscope-transcript-checks
+swiftc Sources/TokenScope/Models.swift Sources/TokenScope/CodexHistory.swift Sources/TokenScope/HistoryFold.swift tools/verify-window.swift -o /tmp/tokenscope-window-checks && /tmp/tokenscope-window-checks
 # read-only corpus sanity: /tmp/tokenscope-transcript-checks --corpus ~/.claude/projects/<project-dir>
 
 # VERIFY UI BEFORE INSTALLING — render the menu with real data:
@@ -65,9 +66,16 @@ reason (`MenuView(snapshotInline: true)`).
   `maxHeight` collapses the entire middle of the menu invisibly (this shipped
   broken for several rounds before being caught).
 - **The events window is whole days.** `UsageStore.eventsCutoff` is
-  startOfDay(now) − 31 days. A calendar day is either entirely live (in
-  `events`) or entirely frozen (in `history`) — `trim()`/`fold()`/backfill all
-  rely on this; don't reintroduce a rolling timestamp cutoff.
+  startOfDay(now) − **28** days (`HistoryFold.retentionDays`; Claude Code deletes
+  transcripts by mtime at ~30 days, so a live day must never outlive its files).
+  A calendar day is either entirely live (in `events`) or entirely frozen (in
+  `history`) — `trim()`/`fold()`/backfill all rely on this; don't reintroduce a
+  rolling timestamp cutoff. Window/fold/journal logic is pure in `HistoryFold.swift`
+  (checks: `tools/verify-window.swift`). Only the whole-day age-out advances the
+  watermarks; the 60k overflow fold advances neither and drops the folded dedup
+  keys. A fold into an existing day+provider bucket merges by max, not sum.
+  Journaled local events that aged out while closed are folded into history at
+  load, then the journal is compacted.
 - **Double-count prevention.** A Claude Code call routed through the proxy is
   seen twice (proxy + transcript). Live: ±90s output-token match marks the proxy
   copy `shadowed`. Startup: `replayFinished` re-reconciles persisted proxy
@@ -199,7 +207,7 @@ Idle CPU must stay near zero. Measured regressions that were fixed; don't undo:
   If absent, it is rebuilt with a one-time backfill (≤366 days) on next launch.
 - Codex raw session logs remain in `~/.codex/sessions/**/*.jsonl`; TokenScope
   reads only `session_meta` and `token_count` records, then retains the same
-  31-day event window and permanent day aggregates as other local sources. Its
+  28-day event window and permanent day aggregates as other local sources. Its
   own persisted watermark drives the one-time ≤366-day history backfill.
 - `~/Library/Logs/TokenScope.log` — lifecycle summaries and sanitized diagnostics;
   first place to look when verifying behavior. Per-event logging is deliberately off.
