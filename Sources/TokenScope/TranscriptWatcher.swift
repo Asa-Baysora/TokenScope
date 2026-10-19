@@ -10,24 +10,13 @@ final class TranscriptWatcher {
     private let queue = DispatchQueue(label: "tokenscope.transcripts", qos: .utility)
     private var timer: DispatchSourceTimer?
     private var offsets: [String: UInt64] = [:]
-    private let decoder = JSONDecoder()
+    private var parser = ClaudeTranscriptParser()
 
     private var cutoff = Date.distantPast        // events-window boundary (whole days)
     private var backfillFrom = Date.distantPast  // history already complete through here
     private var backfilling = false
     private var backfillBatch: [String: DayAgg] = [:]
     private var backfillBestByKey: [String: UsageEvent] = [:]
-
-    private static let isoFrac: ISO8601DateFormatter = {
-        let f = ISO8601DateFormatter()
-        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        return f
-    }()
-    private static let iso: ISO8601DateFormatter = {
-        let f = ISO8601DateFormatter()
-        f.formatOptions = [.withInternetDateTime]
-        return f
-    }()
 
     init(store: UsageStore) { self.store = store }
 
@@ -192,27 +181,6 @@ final class TranscriptWatcher {
         offsets[url.path] = offset + UInt64(consumed)
     }
 
-    private struct Line: Decodable {
-        let type: String?
-        let sessionId: String?
-        let timestamp: String?
-        let cwd: String?
-        let requestId: String?
-        let message: Msg?
-
-        struct Msg: Decodable {
-            let id: String?
-            let model: String?
-            let usage: Usage?
-        }
-        struct Usage: Decodable {
-            let input_tokens: Int?
-            let output_tokens: Int?
-            let cache_read_input_tokens: Int?
-            let cache_creation_input_tokens: Int?
-        }
-    }
-
     // Cheap byte-level pre-filter so bulk replay doesn't JSON-decode every line;
     // assistant lines always contain this, anything else that does just gets decoded.
     private static let assistantMarker = Data("\"assistant\"".utf8)
@@ -274,29 +242,17 @@ final class TranscriptWatcher {
             handleMeta(data, file: file)
             return
         }
-        guard let line = try? decoder.decode(Line.self, from: data),
-              line.type == "assistant",
-              let msg = line.message,
-              let usage = msg.usage,
-              let model = msg.model, model != "<synthetic>" else { return }
+        let path = file.path
+        let observations = parser.parse(
+            data, fileKey: path, fileSession: file.deletingPathExtension().lastPathComponent,
+            mtime: { (try? file.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate })
+        for obs in observations { route(obs.event, key: obs.dedupKey) }
+    }
 
-        let ts = line.timestamp.flatMap { Self.isoFrac.date(from: $0) ?? Self.iso.date(from: $0) } ?? Date()
-        let event = UsageEvent(
-            timestamp: ts,
-            provider: UsageOrigin.classifyClaudeCode(model: model),
-            source: .transcript,
-            model: model,
-            sessionId: line.sessionId ?? file.deletingPathExtension().lastPathComponent,
-            projectName: line.cwd.map { URL(fileURLWithPath: $0).lastPathComponent },
-            inputTokens: usage.input_tokens ?? 0,
-            outputTokens: usage.output_tokens ?? 0,
-            cacheReadTokens: usage.cache_read_input_tokens ?? 0,
-            cacheCreationTokens: usage.cache_creation_input_tokens ?? 0,
-            reasoningTokens: 0)
-
+    private func route(_ event: UsageEvent, key: String) {
+        let ts = event.timestamp
         // Streaming writes can repeat a message across lines. Keep the strongest
         // occurrence so a partial/zero rewrite cannot suppress finalized usage.
-        let key = "\(msg.id ?? UUID().uuidString):\(line.requestId ?? "")"
         if ts >= cutoff {
             store.addTranscriptEvent(event, dedupKey: key)
         } else if backfilling, ts >= backfillFrom {

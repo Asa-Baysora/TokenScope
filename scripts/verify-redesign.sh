@@ -49,6 +49,13 @@ swiftc Sources/TokenScope/Models.swift \
   -o "$cache_root/codex-checks"
 "$cache_root/codex-checks"
 
+swiftc Sources/TokenScope/Models.swift \
+  Sources/TokenScope/EventReconciler.swift \
+  Sources/TokenScope/ClaudeTranscriptParser.swift \
+  tools/verify-transcript.swift \
+  -o "$cache_root/transcript-checks"
+"$cache_root/transcript-checks"
+
 if [[ "${CLI_ONLY:-0}" == "1" ]]; then
   print "CLI-only verification complete."
   print "Skipped the app build and snapshots, which require full Xcode."

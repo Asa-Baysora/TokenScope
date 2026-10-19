@@ -242,8 +242,29 @@ how it feeds the store → privacy → limitations.** Source file named in the h
   30-day replay fast.
 - **Usage parse:** decodes `type == "assistant"`, reads `message.model` and
   `message.usage.{input_tokens, output_tokens, cache_read_input_tokens,
-  cache_creation_input_tokens}`. Provider = `classifyClaudeCode(model:)`. **Skips
+  cache_creation_input_tokens}` (logic in `ClaudeTranscriptParser.swift`, unit-tested by
+  `tools/verify-transcript.swift`). Provider = `classifyClaudeCode(model:)`. **Skips
   `model == "<synthetic>"`** lines entirely.
+- **Unfinalized messages (estimated):** messages ending in `tool_use` never receive a
+  `stop_reason`; every line carries the `message_start` usage snapshot (output ~1–10)
+  although the content holds thinking + text + tool input. Input/cache fields are
+  correct. Claude Code writes one content block per line, so the parser accumulates
+  content chars (text + thinking + compact-JSON tool input, de-duplicated by block)
+  per dedup key and reports `max(observed, ceil(chars / 4))` with
+  `tokenAccuracy = .estimated` (`ClaudeTranscriptParser.charsPerToken`, measured ≈4
+  chars/token on finalized messages). `EventReconciler` ranks `.exact` > `.estimated`
+  before token sum, so a later finalized line replaces the estimate and an estimate
+  never downgrades an exact record. Ollama-routed transcripts (provider `.ollama`)
+  stay `.exact` (proxy shadowing requires an exact transcript twin). The UI already
+  renders `.estimated` with the `~` prefix / "estimated tokens" tooltip.
+- **Advisor iterations:** finalized lines may carry `usage.iterations[]`; entries of
+  type `message` sum to the top-level usage (not re-emitted), while other types
+  (`advisor_message`) hold a SEPARATE model's tokens the top level excludes. Each
+  becomes an extra exact event: model `"<advisor model> (advisor)"`, dedup key
+  `<message.id>:<requestId>:iter<i>`, `finishReason = "advisor_message"`.
+- **Timestamps:** a usage line without `timestamp` inherits the last timestamp seen
+  earlier in the same file (carry-forward, assistant lines), else the file mtime —
+  never the wall clock or replay time.
 - **Ground truth:** the `usage` object Anthropic returns — exact, but only present when
   a message *completes* (no mid-call number for direct Anthropic traffic).
 - **Session titles** (best → fallback):

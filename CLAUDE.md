@@ -32,6 +32,8 @@ swiftc Sources/TokenScope/Models.swift Sources/TokenScope/HTTPRequestScanner.swi
 swiftc Sources/TokenScope/Models.swift Sources/TokenScope/LMStudioEventParser.swift tools/verify-lmstudio.swift -o /tmp/tokenscope-lmstudio-checks && /tmp/tokenscope-lmstudio-checks
 swiftc Sources/TokenScope/ClaudeProjectRoots.swift tools/verify-claude-roots.swift -o /tmp/tokenscope-roots-checks && /tmp/tokenscope-roots-checks
 swiftc Sources/TokenScope/Models.swift Sources/TokenScope/CodexHistory.swift tools/verify-codex.swift -o /tmp/tokenscope-codex-checks && /tmp/tokenscope-codex-checks
+swiftc Sources/TokenScope/Models.swift Sources/TokenScope/EventReconciler.swift Sources/TokenScope/ClaudeTranscriptParser.swift tools/verify-transcript.swift -o /tmp/tokenscope-transcript-checks && /tmp/tokenscope-transcript-checks
+# read-only corpus sanity: /tmp/tokenscope-transcript-checks --corpus ~/.claude/projects/<project-dir>
 
 # VERIFY UI BEFORE INSTALLING — render the menu with real data:
 .build/release/TokenScope --snapshot /tmp/menu.png
@@ -70,6 +72,15 @@ reason (`MenuView(snapshotInline: true)`).
   seen twice (proxy + transcript). Live: ±90s output-token match marks the proxy
   copy `shadowed`. Startup: `replayFinished` re-reconciles persisted proxy
   events. Totals exclude shadowed events; don't count them anywhere else.
+- **Claude transcript accuracy** (`ClaudeTranscriptParser.swift`). ~half of messages
+  (those ending in `tool_use`) never get a `stop_reason`, so every line keeps the
+  `message_start` output snapshot (1–10 tokens). One content block per line: chars are
+  accumulated per `message.id:requestId`, output = max(observed, ceil(chars/4)),
+  `tokenAccuracy = .estimated`; a finalized line is `.exact` and always beats it in
+  `EventReconciler`. `usage.iterations[]` entries with type ≠ "message" (advisor
+  calls) are a separate model's tokens → extra events `"<key>:iter<i>"`, model
+  suffixed " (advisor)". Missing `timestamp` → previous line's in that file, else
+  file mtime, never `Date()`.
 - **Transcript dedup** is `message.id:requestId`; `EventReconciler` keeps the
   strongest observation so a final rewrite upgrades a partial/zero record and a
   later stale replay cannot downgrade it.
