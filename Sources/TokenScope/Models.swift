@@ -234,8 +234,12 @@ struct Totals {
     /// which never persists runtime counts). Kept separate so the UI can say
     /// "tokens unavailable" instead of fabricating a "↑ 0 ↓ 0".
     var unmetered = 0
+    /// Calls whose output was estimated (streamed count, no final usage yet).
+    /// Drives the "~" marker on totals: when > 0 the output sum is a floor.
+    var estimated = 0
 
     mutating func add(_ e: UsageEvent) {
+        if e.tokenAccuracy == .estimated { estimated += 1 }
         input += e.inputTokens
         output += e.outputTokens
         cacheRead += e.cacheReadTokens

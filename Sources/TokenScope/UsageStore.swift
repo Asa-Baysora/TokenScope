@@ -43,7 +43,23 @@ final class UsageStore: ObservableObject {
     @Published private(set) var now = Date()
 
     /// All usage before this date is fully captured in `history`.
+    /// Since schema 3 this is the FLOOR of the per-root Claude watermarks
+    /// (`rootHistoryCompleteThrough`) once any exist, kept for the journal
+    /// partition and the store-level `isFolded` backstop; the watcher's per-root
+    /// watermark is what decides backfill and drops.
     private(set) var historyCompleteThrough = Date(timeIntervalSince1970: 0)
+    /// Claude transcript history is complete through this date PER ROOT (primary,
+    /// Cowork, extras; key = standardized root path). A root removed from the
+    /// config keeps its entry (harmless).
+    private(set) var rootHistoryCompleteThrough: [String: Date] = [:]
+    /// Loaded a pre-3 history file: the single Claude watermark has not yet been
+    /// fanned out to per-root entries. While true `saveHistory` keeps writing
+    /// schema 2, so a save before the seed can never strand a schema-3 file with
+    /// no root entries (which would re-backfill the primary root and double it).
+    private var legacySeedPending = false
+    /// True once the Claude transcript replay (and its backfill) has finished.
+    /// Snapshot waits on this instead of a fixed sleep.
+    private(set) var replayComplete = false
     /// Codex logs are independent from Claude Code transcripts, so their
     /// one-time historical replay needs its own persisted watermark.
     private(set) var codexHistoryCompleteThrough = Date(timeIntervalSince1970: 0)
@@ -73,8 +89,13 @@ final class UsageStore: ObservableObject {
         var completeThrough: Double
         var codexCompleteThrough: Double?
         var schema: Int?
+        var rootCompleteThrough: [String: Double]?
         var days: [String: DayAgg]
     }
+
+    /// daily-history.json schema. 3 = per-root Claude watermarks. (The Codex
+    /// one-time strip is keyed on `CodexHistory.historySchema`, still 2.)
+    static let historySchema = 3
 
     private static let dayKeyFmt: DateFormatter = {
         let f = DateFormatter()
@@ -464,17 +485,50 @@ final class UsageStore: ObservableObject {
     /// that backfill: they are what journaled proxy records that aged out while the
     /// app was closed must be shadowed against BEFORE those records fold (order
     /// matters: the fold max-merges into an existing bucket, the backfill sums).
-    func mergeHistorical(_ batch: [String: DayAgg], ollamaTwins: [UsageEvent] = []) {
-        guard !batch.isEmpty else { return }
+    /// `coveredRoots` advance to `coverThrough` in the SAME main-queue block as the
+    /// merge, so no save can persist the backfilled days without their watermark
+    /// (that would double them on the next launch). The merge is ADDITIVE
+    /// (`HistoryFold.mergeAdditive`): a day may already hold another root's data.
+    func mergeHistorical(_ batch: [String: DayAgg], ollamaTwins: [UsageEvent] = [],
+                         coveredRoots: [String] = [], coverThrough: Date? = nil) {
+        guard !batch.isEmpty || !coveredRoots.isEmpty else { return }
         DispatchQueue.main.async {
             self.foldPendingAged(twins: ollamaTwins)
-            for (k, v) in batch {
-                var d = self.history[k] ?? DayAgg()
-                d.merge(v)
-                self.history[k] = d
-            }
-            FileLog.log("backfilled \(batch.count) days into history")
+            HistoryFold.mergeAdditive(batch, into: &self.history)
+            if let cover = coverThrough { self.advanceRoots(coveredRoots, to: cover) }
+            if !batch.isEmpty { FileLog.log("backfilled \(batch.count) days into history") }
         }
+    }
+
+    /// Sets/advances per-root watermarks (main queue) and recomputes the floor.
+    private func advanceRoots(_ roots: [String], to cover: Date) {
+        for r in roots { rootHistoryCompleteThrough[r] = max(rootHistoryCompleteThrough[r] ?? .distantPast, cover) }
+        recomputeFloor(fallback: max(historyCompleteThrough, cover))
+    }
+
+    private func recomputeFloor(fallback: Date) {
+        historyCompleteThrough = rootHistoryCompleteThrough.values.min() ?? fallback
+    }
+
+    /// Per-root watermarks for the transcript watcher's bootstrap (thread-safe via
+    /// main, like `claudeWatermark`). On the first call after an upgrade from a
+    /// pre-3 history file, every root in `seedLegacy` (those the old shared
+    /// watermark really covered: primary and extras) is seeded with that shared
+    /// watermark and the result is persisted. Roots without an entry (never
+    /// seen, e.g. Cowork, which post-dates schema 2) are absent from the result;
+    /// the caller starts them at `ancient`.
+    func resolveRootWatermarks(roots: [String], seedLegacy: Set<String>) -> [String: Date] {
+        let work = { () -> [String: Date] in
+            if self.legacySeedPending {
+                for r in seedLegacy where self.rootHistoryCompleteThrough[r] == nil {
+                    self.rootHistoryCompleteThrough[r] = self.historyCompleteThrough
+                }
+                self.legacySeedPending = false
+                self.saveHistory()
+            }
+            return self.rootHistoryCompleteThrough
+        }
+        return Thread.isMainThread ? work() : DispatchQueue.main.sync(execute: work)
     }
 
     /// Thread-safe read of the Codex watermark. Writers update it on main, so
@@ -509,7 +563,7 @@ final class UsageStore: ObservableObject {
     /// bulk-loaded events, shadows persisted proxy events that match a transcript
     /// record of the same call (the live matching above only covers runtime arrivals),
     /// and records how far back history is now complete.
-    func replayFinished(coverThrough: Date) {
+    func replayFinished(coverThrough: Date, roots: [String] = []) {
         DispatchQueue.main.async {
             var evs = self.events
             evs.sort { $0.timestamp < $1.timestamp }
@@ -526,7 +580,12 @@ final class UsageStore: ObservableObject {
             let shadowed = changed.count
             // Aged journal records the backfill did not take (no backfill ran).
             self.foldPendingAged(twins: [])
-            self.historyCompleteThrough = max(self.historyCompleteThrough, coverThrough)
+            if roots.isEmpty {
+                self.historyCompleteThrough = max(self.historyCompleteThrough, coverThrough)
+            } else {
+                self.advanceRoots(roots, to: coverThrough)
+            }
+            self.replayComplete = true
             self.saveHistory()
             FileLog.log("replay complete: \(self.events.count) events in window, \(shadowed) proxy events shadowed, history through \(Self.dayKey(self.historyCompleteThrough))")
             #if DEBUG
@@ -560,7 +619,8 @@ final class UsageStore: ObservableObject {
     private func trim() {
         var w = HistoryFold.Window(
             events: events, keyIDs: eventIDByDedupKey, history: history,
-            claudeThrough: historyCompleteThrough, codexThrough: codexHistoryCompleteThrough)
+            claudeThrough: historyCompleteThrough, codexThrough: codexHistoryCompleteThrough,
+            rootThrough: rootHistoryCompleteThrough)
         let before = events.count
         guard before > HistoryFold.overflowCap
                 || (events.first.map { $0.timestamp < eventsCutoff } ?? false) else { return }
@@ -569,7 +629,8 @@ final class UsageStore: ObservableObject {
         events = w.events
         eventIDByDedupKey = w.keyIDs
         history = w.history
-        historyCompleteThrough = w.claudeThrough
+        rootHistoryCompleteThrough = w.rootThrough
+        historyCompleteThrough = w.rootThrough.values.min() ?? w.claudeThrough
         codexHistoryCompleteThrough = w.codexThrough
         saveHistory()
         logMaxMerges(r.conflicts)
@@ -588,6 +649,9 @@ final class UsageStore: ObservableObject {
               let f = try? JSONDecoder().decode(HistoryFile.self, from: data) else { return }
         history = f.days
         historyCompleteThrough = Date(timeIntervalSince1970: f.completeThrough)
+        rootHistoryCompleteThrough = (f.rootCompleteThrough ?? [:]).mapValues(Date.init(timeIntervalSince1970:))
+        legacySeedPending = (f.schema ?? 1) < Self.historySchema
+        if !rootHistoryCompleteThrough.isEmpty { recomputeFloor(fallback: historyCompleteThrough) }
         codexHistoryCompleteThrough = f.codexCompleteThrough.map(Date.init(timeIntervalSince1970:))
             ?? Date(timeIntervalSince1970: 0)
         // One-time repair: pre-v2 history could hold doubled Codex days (fold()
@@ -599,19 +663,24 @@ final class UsageStore: ObservableObject {
             FileLog.log("history schema \(f.schema ?? 1) -> \(CodexHistory.historySchema): stripped Codex days, rebuilding from rollout files")
             saveHistory()
         }
-        FileLog.log("loaded daily history: \(f.days.count) days, Claude through \(Self.dayKey(historyCompleteThrough)), Codex through \(Self.dayKey(codexHistoryCompleteThrough))")
+        FileLog.log("loaded daily history (schema \(f.schema ?? 1)): \(f.days.count) days, \(rootHistoryCompleteThrough.count) root watermark(s), Claude through \(Self.dayKey(historyCompleteThrough)), Codex through \(Self.dayKey(codexHistoryCompleteThrough))")
     }
 
     private func saveHistory() {
         let f = HistoryFile(
             completeThrough: historyCompleteThrough.timeIntervalSince1970,
             codexCompleteThrough: codexHistoryCompleteThrough.timeIntervalSince1970,
-            schema: CodexHistory.historySchema,
+            schema: legacySeedPending ? CodexHistory.historySchema : Self.historySchema,
+            rootCompleteThrough: rootHistoryCompleteThrough.mapValues { $0.timeIntervalSince1970 },
             days: history)
-        guard let data = try? JSONEncoder().encode(f) else { return }
+        // Deterministic bytes (sorted keys), and no rewrite when nothing changed.
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        guard let data = try? encoder.encode(f) else { return }
         ioQueue.async {
             try? FileManager.default.createDirectory(at: Self.supportDir, withIntermediateDirectories: true)
-            try? data.write(to: Self.historyURL)
+            if let current = try? Data(contentsOf: Self.historyURL), current == data { return }
+            try? data.write(to: Self.historyURL, options: .atomic)
         }
     }
 
@@ -770,14 +839,19 @@ final class UsageStore: ObservableObject {
 
     private func rewriteLocalEventJournal(_ records: [String: UsageEvent]) {
         let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
         var compacted = Data()
-        for (key, event) in records.sorted(by: { $0.value.timestamp < $1.value.timestamp }) {
+        // Timestamp, then key: a stable total order (dictionary order is random per run).
+        for (key, event) in records.sorted(by: {
+            $0.value.timestamp != $1.value.timestamp ? $0.value.timestamp < $1.value.timestamp : $0.key < $1.key
+        }) {
             guard var line = try? encoder.encode(PersistedLocalEvent(schema: 2, key: key, event: event)) else { continue }
             line.append(0x0A)
             compacted.append(line)
         }
         ioQueue.async {
             try? FileManager.default.createDirectory(at: Self.supportDir, withIntermediateDirectories: true)
+            if let current = try? Data(contentsOf: Self.localEventsURL), current == compacted { return }
             try? compacted.write(to: Self.localEventsURL, options: .atomic)
         }
     }

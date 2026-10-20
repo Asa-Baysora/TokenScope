@@ -28,6 +28,11 @@ struct StoreChecks {
         var days: [String: DayAgg]
     }
 
+    struct HistoryFileMirror2: Codable {
+        var schema: Int?
+        var rootCompleteThrough: [String: Double]?
+    }
+
     static func wipe() {
         try? FileManager.default.removeItem(at: dir)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -81,6 +86,50 @@ struct StoreChecks {
         s.events.filter { !$0.shadowed }.reduce(0) { $0 + $1.inputTokens + $1.outputTokens }
     }
     static func dayAgg(of e: UsageEvent) -> DayAgg { var d = DayAgg(); d.add(e); return d }
+
+
+    // MARK: per-root watcher fixtures
+
+    static func iso(_ d: Date) -> String {
+        let f = ISO8601DateFormatter(); f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        f.timeZone = TimeZone(identifier: "UTC")
+        return f.string(from: d)
+    }
+    /// Local noon of the day `offset` days from `base` (whole days), clear of DST/UTC edges.
+    static func noon(_ base: Date, _ offset: Int) -> Date {
+        cal.date(byAdding: .hour, value: 12, to: cal.date(byAdding: .day, value: offset, to: cal.startOfDay(for: base))!)!
+    }
+    /// Writes finalized (exact) assistant lines: (id, timestamp, output tokens).
+    static func writeTranscript(_ url: URL, _ lines: [(String, Date, Int)], mtime: Date) {
+        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        var data = Data()
+        for (id, ts, out) in lines {
+            let usage: [String: Any] = ["input_tokens": 1, "output_tokens": out,
+                                        "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0]
+            let msg: [String: Any] = ["id": id, "model": "claude-x", "content": [["type": "text", "text": "hi"]],
+                                      "usage": usage, "stop_reason": "end_turn"]
+            let o: [String: Any] = ["type": "assistant", "sessionId": "s-\(id)", "requestId": "req-\(id)",
+                                    "cwd": "/tmp/p", "timestamp": iso(ts), "message": msg]
+            data.append(try! JSONSerialization.data(withJSONObject: o)); data.append(0x0A)
+        }
+        try! data.write(to: url)
+        try! FileManager.default.setAttributes([.modificationDate: mtime], ofItemAtPath: url.path)
+    }
+    /// One simulated launch: fresh store over the same support dir + a watcher over `roots`.
+    static func launch(roots: [(URL, ClaudeProjectRoots.Kind)]) -> (UsageStore, TranscriptWatcher) {
+        let store = UsageStore()
+        pump()
+        let w = TranscriptWatcher(store: store, rootsProvider: {
+            var kinds: [String: ClaudeProjectRoots.Kind] = [:]
+            for (u, k) in roots { kinds[u.path] = k }
+            return TranscriptWatcher.RootSet(existing: roots.map(\.0), kinds: kinds)
+        })
+        w.start()
+        let deadline = Date().addingTimeInterval(15)
+        while !store.replayComplete && Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+        pump(); store.flushIO()
+        return (store, w)
+    }
 
     // MARK: main
 
@@ -257,6 +306,81 @@ struct StoreChecks {
             }
             check(r.eventsAreSorted, "randomised single+batch ingest/replace keeps events sorted")
             check(Set(r.events.map(\.id)).count == r.events.count, "no duplicate event ids after replacements")
+        }
+
+
+        // 4. Per-root history watermarks (schema 3): a root added on a later launch with files OLDER than
+        //    root A's watermark backfills ADDITIVELY; a third launch changes nothing; an event below A's
+        //    watermark arriving in A is dropped while the same-dated event in B is backfilled.
+        do {
+            wipe()
+            let rootA = dir.appendingPathComponent("rootA/projects", isDirectory: true)
+            let rootB = dir.appendingPathComponent("rootB/projects", isDirectory: true)
+            let d20 = noon(cutoff, -20), d10 = noon(cutoff, -10), live = noon(today, -1)
+            let k20 = UsageStore.dayKey(d20), k10 = UsageStore.dayKey(d10)
+            // Legacy (schema 2) file: one shared Claude watermark at cutoff-15d.
+            writeHistory(claudeThrough: noon(cutoff, -15))
+            writeTranscript(rootA.appendingPathComponent("p/a.jsonl"),
+                            [("a20", d20, 11), ("a10", d10, 100), ("alive", live, 7)], mtime: now)
+            writeTranscript(rootB.appendingPathComponent("p/b.jsonl"),
+                            [("b20", d20, 40), ("b10", d10, 25)], mtime: noon(cutoff, -17))
+            writeTranscript(rootB.appendingPathComponent("p/b2.jsonl"), [("blive", live, 9)], mtime: now)
+            func hist() -> HistoryFileMirror2 {
+                try! JSONDecoder().decode(HistoryFileMirror2.self, from: Data(contentsOf: historyURL))
+            }
+            func claudeOut(_ s: UsageStore, _ k: String) -> Int? { s.history[k].map { $0.claudeOut } }
+
+            // Launch 1: root A only. Upgrade seeds A with the shared watermark.
+            let (s1, w1) = launch(roots: [(rootA, .primary)])
+            check(claudeOut(s1, k10) == 100, "L1: A's day above its (seeded) watermark is backfilled (100)")
+            check(s1.history[k20] == nil, "L1: A's event BELOW A's watermark is dropped (no \(k20) row)")
+            check(s1.events.count == 1 && s1.events[0].outputTokens == 7, "L1: A's live event replayed")
+            check(hist().schema == 3 && hist().rootCompleteThrough?[rootA.path] == cutoff.timeIntervalSince1970,
+                  "L1: schema 3 + A's root watermark advanced to the cutoff")
+            w1.stop()
+
+            // Launch 2: B added; its files are older than A's watermark but B has no entry (starts at ancient).
+            let (s2, w2) = launch(roots: [(rootA, .primary), (rootB, .cowork)])
+            check(claudeOut(s2, k10) == 125, "L2: B's backfill is ADDITIVE onto A's day (100 + 25 = 125, got \(claudeOut(s2, k10) ?? -1))")
+            check(claudeOut(s2, k20) == 40, "L2: same-dated event dropped in A is backfilled from B (40, got \(claudeOut(s2, k20) ?? -1))")
+            check(s2.events.count == 2 && Set(s2.events.map(\.outputTokens)) == [7, 9], "L2: both roots' live events replayed, none duplicated")
+            check(s2.rootHistoryCompleteThrough[rootB.path] == cutoff && s2.rootHistoryCompleteThrough[rootA.path] == cutoff,
+                  "L2: both roots' watermarks at the cutoff")
+            check(s2.historyCompleteThrough == cutoff, "L2: global watermark = min(root watermarks)")
+            w2.stop()
+            let bytes2 = try! Data(contentsOf: historyURL)
+            let histBefore = s2.history
+
+            // Launch 3: idempotent.
+            let (s3, w3) = launch(roots: [(rootA, .primary), (rootB, .cowork)])
+            check(s3.history == histBefore, "L3: history unchanged (no re-backfill)")
+            check((try? Data(contentsOf: historyURL)) == bytes2, "L3: daily-history.json byte-identical")
+            check(s3.events.count == 2, "L3: live window unchanged (2 events)")
+            w3.stop()
+
+            // A removed root keeps its watermark entry.
+            let (s4, w4) = launch(roots: [(rootA, .primary)])
+            check(s4.rootHistoryCompleteThrough[rootB.path] == cutoff && s4.history == histBefore, "L4: removed root keeps its entry, history unchanged")
+            w4.stop()
+            _ = (s1, s2, s3, s4)
+        }
+
+        // 5. Legacy upgrade never strands a schema-3 file without root entries, and Cowork is "never seen".
+        do {
+            wipe()
+            let rootA = dir.appendingPathComponent("rootA/projects", isDirectory: true)
+            let cow = dir.appendingPathComponent("cow", isDirectory: true)
+            writeHistory(claudeThrough: noon(cutoff, -15))
+            let store = UsageStore(); pump()
+            check(store.resolveRootWatermarks(roots: [rootA.path, cow.path], seedLegacy: [rootA.path])[rootA.path] == noon(cutoff, -15),
+                  "legacy: primary seeded with the shared watermark")
+            check(store.resolveRootWatermarks(roots: [cow.path], seedLegacy: [])[cow.path] == nil, "legacy: Cowork root has no entry (starts at ancient)")
+            // pure route() rule: per-root watermark decides
+            let t = noon(cutoff, -12)
+            check(HistoryFold.route(t, cutoff: cutoff, backfilling: true, backfillFrom: noon(cutoff, -15), watermark: noon(cutoff, -15)) == .backfill,
+                  "route: event above the root's watermark backfills")
+            check(HistoryFold.route(t, cutoff: cutoff, backfilling: true, backfillFrom: noon(cutoff, -10), watermark: noon(cutoff, -10)) == .drop,
+                  "route: the same event below another root's watermark drops")
         }
 
         print(failures == 0 ? "store checks passed" : "store checks FAILED: \(failures)")

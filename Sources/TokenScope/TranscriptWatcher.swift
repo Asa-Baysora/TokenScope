@@ -13,12 +13,28 @@ final class TranscriptWatcher {
     private var parser = ClaudeTranscriptParser()
 
     private var cutoff = Date.distantPast        // events-window boundary (whole days)
-    private var backfillFrom = Date.distantPast  // history already complete through here
+    /// PER ROOT (schema 3): history for that root is already complete through its
+    /// value (bounded below by now − 366 d). A root with no entry yet (added at
+    /// runtime) is absent: nothing is backfilled for it until the next launch.
+    private var rootFrom: [String: Date] = [:]
+    private var rootBackfilling: [String: Bool] = [:]
     private var backfilling = false
-    private var backfillBatch: [String: DayAgg] = [:]
-    private var backfillBestByKey: [String: UsageEvent] = [:]
+    /// File path -> root path it was enumerated under (first root wins for nested roots).
+    private var fileRoot: [String: String] = [:]
+    private var backfillBestByKey: [String: (event: UsageEvent, root: String)] = [:]
 
-    init(store: UsageStore) { self.store = store }
+    /// Test seam: the resolved root set. Production resolves from defaults + home.
+    struct RootSet {
+        var existing: [URL]
+        var kinds: [String: ClaudeProjectRoots.Kind]
+        var rejected: [String] = []
+    }
+    private let rootsProvider: (() -> RootSet)?
+
+    init(store: UsageStore, rootsProvider: (() -> RootSet)? = nil) {
+        self.store = store
+        self.rootsProvider = rootsProvider
+    }
 
     func start() {
         queue.async {
@@ -28,20 +44,34 @@ final class TranscriptWatcher {
             self.flushReplayBatch()
             self.bulkReplay = false
             if self.backfilling {
-                for event in self.backfillBestByKey.values {
-                    self.backfillBatch[UsageStore.dayKey(event.timestamp), default: DayAgg()].add(event)
+                // One additive batch across roots (each root holds different messages);
+                // per-root stats are logged so a silent root is visible.
+                var batch: [String: DayAgg] = [:]
+                var stats: [String: (events: Int, days: Set<String>, out: Int)] = [:]
+                for (event, root) in self.backfillBestByKey.values {
+                    let day = UsageStore.dayKey(event.timestamp)
+                    batch[day, default: DayAgg()].add(event)
+                    var st = stats[root] ?? (0, [], 0)
+                    st.events += 1; st.days.insert(day); st.out += event.outputTokens
+                    stats[root] = st
+                }
+                for root in stats.keys.sorted() {
+                    let st = stats[root]!
+                    let days = st.days.sorted()
+                    FileLog.log("claude backfill [\(self.label(root))] \(root): \(st.events) events, \(st.out) output tokens over \(days.count) days (\(days.first ?? "-")..\(days.last ?? "-")), from \(UsageStore.dayKey(self.rootFrom[root] ?? .distantPast))")
                 }
                 // Exact Ollama-routed transcript events let the store shadow journaled
                 // proxy records that aged out while closed (see foldPendingAged).
-                let twins = self.backfillBestByKey.values.filter {
+                let twins = self.backfillBestByKey.values.map(\.event).filter {
                     $0.provider == .ollama && $0.tokenAccuracy == .exact
                 }
-                self.store.mergeHistorical(self.backfillBatch, ollamaTwins: Array(twins))
-                self.backfillBatch = [:]
+                let covered = self.roots.map(\.path).filter { self.rootBackfilling[$0] == true }
+                self.store.mergeHistorical(batch, ollamaTwins: twins,
+                                           coveredRoots: covered, coverThrough: self.cutoff)
                 self.backfillBestByKey = [:]
                 self.backfilling = false
             }
-            self.store.replayFinished(coverThrough: self.cutoff)
+            self.store.replayFinished(coverThrough: self.cutoff, roots: self.roots.map(\.path))
         }
         let t = DispatchSource.makeTimerSource(queue: queue)
         t.schedule(deadline: .now() + 3.0, repeating: 1.0, leeway: .milliseconds(300))  // coalescing; logic counts ticks, not exact seconds
@@ -54,6 +84,9 @@ final class TranscriptWatcher {
         timer = t
     }
 
+    /// Stops the poll timer (tests; the app never stops it).
+    func stop() { timer?.cancel(); timer = nil }
+
     /// Lines newer than the events cutoff replay into the live window; older lines
     /// not yet covered by the persisted daily history get aggregated into it
     /// (backfill). Files whose mtime predates the covered range hold nothing new —
@@ -61,22 +94,36 @@ final class TranscriptWatcher {
     private func bootstrap() {
         cutoff = store.eventsCutoff
         let ancient = Date().addingTimeInterval(-366 * 86400)
-        // Same main-queue read the Codex side uses: the watermark is written on main.
-        backfillFrom = max(store.claudeWatermark(), ancient)
-        backfilling = backfillFrom < cutoff
-        var read = 0
         refreshRoots(seed: false)
+        // Main-queue read (like the Codex side): watermarks are written on main.
+        // Primary + extra roots were covered by the pre-3 shared watermark; Cowork
+        // post-dates it, so it is "never seen" and starts at `ancient`.
+        let wms = store.resolveRootWatermarks(
+            roots: roots.map(\.path),
+            seedLegacy: Set(roots.filter { rootKinds[$0.path] != .cowork }.map(\.path)))
+        rootFrom = [:]
+        rootBackfilling = [:]
+        for r in roots {
+            let from = max(wms[r.path] ?? ancient, ancient)
+            rootFrom[r.path] = from
+            rootBackfilling[r.path] = from < cutoff
+        }
+        backfilling = rootBackfilling.values.contains(true)
+        var read = 0
         for u in jsonlFiles() {
             let vals = try? u.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey])
             let mtime = vals?.contentModificationDate ?? .distantPast
-            if mtime < backfillFrom {
+            if mtime < (rootFrom[fileRoot[u.path] ?? ""] ?? .distantPast) {
                 offsets[u.path] = UInt64(vals?.fileSize ?? 0)
             } else {
                 read += 1
             }
         }
-        FileLog.log("transcript watcher started; reading \(read) files (events since \(UsageStore.dayKey(cutoff)), backfill from \(UsageStore.dayKey(backfillFrom)))")
+        let per = roots.map { "\(label($0.path)) from \(UsageStore.dayKey(rootFrom[$0.path] ?? .distantPast))" }.joined(separator: "; ")
+        FileLog.log("transcript watcher started; reading \(read) files (events since \(UsageStore.dayKey(cutoff)); per-root backfill: \(per))")
     }
+
+    private func label(_ root: String) -> String { (rootKinds[root] ?? .extra).label }
 
     private var roots: [URL] = []
     private var knownRoots: Set<String> = []
@@ -95,10 +142,19 @@ final class TranscriptWatcher {
     /// (that would double-count against proxy events). Logs the root set once per
     /// change.
     private func refreshRoots(seed: Bool) {
-        let d = UserDefaults.standard.object(forKey: ClaudeProjectRoots.defaultsKey)
-        let r = ClaudeProjectRoots.resolveDetailed(
-            extra: ClaudeProjectRoots.entries(from: d), home: home)
-        let existing = ClaudeProjectRoots.existing(extra: ClaudeProjectRoots.entries(from: d), home: home)
+        let resolved: RootSet
+        if let rootsProvider {
+            resolved = rootsProvider()
+        } else {
+            let d = UserDefaults.standard.object(forKey: ClaudeProjectRoots.defaultsKey)
+            let r = ClaudeProjectRoots.resolveDetailed(
+                extra: ClaudeProjectRoots.entries(from: d), home: home)
+            resolved = RootSet(
+                existing: ClaudeProjectRoots.existing(extra: ClaudeProjectRoots.entries(from: d), home: home),
+                kinds: r.kinds, rejected: r.rejected)
+        }
+        let existing = resolved.existing
+        let r = (kinds: resolved.kinds, rejected: resolved.rejected)
         let paths = Set(existing.map(\.path))
         if seed {
             for root in existing where !knownRoots.contains(root.path) {
@@ -123,7 +179,10 @@ final class TranscriptWatcher {
         var out: [URL] = []
         var seen = Set<String>()
         for root in roots {
-            for u in enumerate(root) where seen.insert(u.path).inserted { out.append(u) }  // nested roots
+            for u in enumerate(root) where seen.insert(u.path).inserted {  // nested roots: first root wins
+                out.append(u)
+                fileRoot[u.path] = root.path
+            }
         }
         return out
     }
@@ -173,11 +232,13 @@ final class TranscriptWatcher {
     private final class FileContext {
         let url: URL
         let path: String
+        let root: String
         let fileSession: String
         private var mtimeResolved = false
         private var mtimeValue: Date?
-        init(_ url: URL) {
+        init(_ url: URL, root: String) {
             self.url = url
+            self.root = root
             path = url.path
             fileSession = url.deletingPathExtension().lastPathComponent
         }
@@ -198,7 +259,7 @@ final class TranscriptWatcher {
     /// from piling up across the whole replay.
     private func readNew(_ url: URL, from offset: UInt64) {
         autoreleasepool {
-            let ctx = FileContext(url)
+            let ctx = FileContext(url, root: fileRoot[url.path] ?? "")
             let end = TranscriptIO.forEachLine(path: ctx.path, from: offset) { raw, _ in
                 parse(raw, ctx)
             }
@@ -278,7 +339,7 @@ final class TranscriptWatcher {
         let observations = parser.parse(
             TranscriptIO.data(raw), fileKey: ctx.path, fileSession: ctx.fileSession,
             mtime: { ctx.mtime() })
-        for obs in observations { route(obs.event, key: obs.dedupKey) }
+        for obs in observations { route(obs.event, key: obs.dedupKey, root: ctx.root) }
     }
 
     /// Launch replay hands events to the main actor in batches (one main hop, one
@@ -296,13 +357,16 @@ final class TranscriptWatcher {
         store.ingest(batch: batch)
     }
 
-    private func route(_ event: UsageEvent, key: String) {
+    private func route(_ event: UsageEvent, key: String, root: String) {
         // Streaming writes can repeat a message across lines. Keep the strongest
         // occurrence so a partial/zero rewrite cannot suppress finalized usage.
-        // `backfillFrom` is the persisted watermark: events below it are already in
-        // history even when it sits above `cutoff` (an overflow fold advanced it).
-        switch HistoryFold.route(event.timestamp, cutoff: cutoff, backfilling: backfilling,
-                                 backfillFrom: backfillFrom, watermark: backfillFrom) {
+        // The ROOT's persisted watermark: events below it are already in history
+        // even when it sits above `cutoff` (an overflow fold advanced it). A root
+        // with a lower watermark (e.g. Cowork) still backfills the same dates.
+        let from = rootFrom[root] ?? .distantPast
+        switch HistoryFold.route(event.timestamp, cutoff: cutoff,
+                                 backfilling: rootBackfilling[root] ?? false,
+                                 backfillFrom: from, watermark: from) {
         case .live:
             if bulkReplay {
                 replayBatch.append((event, key))
@@ -312,9 +376,9 @@ final class TranscriptWatcher {
             }
         case .backfill:
             if let existing = backfillBestByKey[key] {
-                backfillBestByKey[key] = EventReconciler.preferred(existing, event)
+                backfillBestByKey[key] = (EventReconciler.preferred(existing.event, event), existing.root)
             } else {
-                backfillBestByKey[key] = event
+                backfillBestByKey[key] = (event, root)
             }
         case .drop:
             break

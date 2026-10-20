@@ -499,9 +499,12 @@ struct MenuView: View {
             .padding(.bottom, 12)
 
             HStack(alignment: .firstTextBaseline, spacing: 9) {
-                Text(Fmt.compact(headline))
+                Text("\(totals.estimated > 0 ? "~" : "")\(Fmt.compact(headline))")
                     .font(.system(size: 38, weight: .semibold, design: .monospaced))
                     .tracking(-1.1)
+                    .help(totals.estimated > 0
+                          ? "~ means \(totals.estimated) call\(totals.estimated == 1 ? "" : "s") in this period have estimated output tokens (counted from visible text before final usage arrived); the total is a floor."
+                          : "")
                 Text("tokens")
                     .font(.system(size: 10)).foregroundStyle(.tertiary)
             }
@@ -1572,7 +1575,8 @@ struct MenuView: View {
                                 .foregroundStyle(.secondary).fixedSize()
                                 .help("Prompt-cache reads: context re-served from cache on each call instead of resent as fresh input. Billed at ~10% of the input rate.")
                         }
-                        Text("↓ \(Fmt.compact(t.output))").fixedSize()
+                        Text("↓ \(t.estimated > 0 ? "~" : "")\(Fmt.compact(t.output))").fixedSize()
+                            .help(t.estimated > 0 ? "~ means \(t.estimated) call\(t.estimated == 1 ? "" : "s") have estimated output tokens (counted from visible text before final usage arrived); the figure is a floor." : "")
                         if t.reasoning > 0 {
                             Text("· \(Fmt.compact(t.reasoning)) reasoning")
                                 .foregroundStyle(.secondary).fixedSize()

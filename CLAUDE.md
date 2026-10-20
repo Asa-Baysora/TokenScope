@@ -34,7 +34,7 @@ swiftc Sources/TokenScope/ClaudeProjectRoots.swift tools/verify-claude-roots.swi
 swiftc Sources/TokenScope/Models.swift Sources/TokenScope/CodexHistory.swift tools/verify-codex.swift -o /tmp/tokenscope-codex-checks && /tmp/tokenscope-codex-checks
 swiftc Sources/TokenScope/Models.swift Sources/TokenScope/EventReconciler.swift Sources/TokenScope/ClaudeTranscriptParser.swift tools/verify-transcript.swift -o /tmp/tokenscope-transcript-checks && /tmp/tokenscope-transcript-checks
 swiftc Sources/TokenScope/Models.swift Sources/TokenScope/CodexHistory.swift Sources/TokenScope/HistoryFold.swift tools/verify-window.swift -o /tmp/tokenscope-window-checks && /tmp/tokenscope-window-checks
-swiftc Sources/TokenScope/{Models,Fmt,PollSupport,TranscriptIO,HistoryFold,CodexHistory,EventReconciler,UsageStore,ResponseScanner,HTTPResponseFramer,HTTPRequestScanner,HTTPIdentityEncodingRewriter}.swift tools/verify-store.swift -o /tmp/tokenscope-store-checks && /tmp/tokenscope-store-checks   # real UsageStore on a scratch TOKENSCOPE_SUPPORT_DIR
+swiftc Sources/TokenScope/{Models,Fmt,PollSupport,TranscriptIO,HistoryFold,CodexHistory,EventReconciler,UsageStore,ResponseScanner,HTTPResponseFramer,HTTPRequestScanner,HTTPIdentityEncodingRewriter,TranscriptWatcher,ClaudeProjectRoots,ClaudeTranscriptParser}.swift tools/verify-store.swift -o /tmp/tokenscope-store-checks && /tmp/tokenscope-store-checks   # real UsageStore on a scratch TOKENSCOPE_SUPPORT_DIR
 swiftc Sources/TokenScope/PollSupport.swift tools/verify-lightness.swift -o /tmp/tokenscope-lightness-checks && /tmp/tokenscope-lightness-checks   # backoff, publish-on-change, today binary search, log rotation
 # read-only corpus sanity: /tmp/tokenscope-transcript-checks --corpus ~/.claude/projects/<project-dir>
 
@@ -81,6 +81,11 @@ reason (`MenuView(snapshotInline: true)`).
   day+provider bucket merges by max, not sum. Journaled local events that aged out while
   closed are folded at load (LM Studio) or held until the transcript backfill supplies
   their Ollama twins (proxy/Desktop), then folded, then the journal is compacted.
+  **Claude watermarks are PER ROOT** (`rootCompleteThrough`, schema 3): a shared one made
+  Cowork (older mtimes) start at EOF and lose 78 days. Backfill merges ADDITIVELY across
+  roots (`HistoryFold.mergeAdditive`); max-merge (`mergeByMax`) is only for re-folding the
+  same records. History/journal writes are deterministic (sorted keys, stable sort, skipped
+  when unchanged). Snapshot waits on `store.replayComplete`, not a fixed sleep.
   `TOKENSCOPE_SUPPORT_DIR` redirects the support dir and the log (testing).
   `events` must stay sorted: an in-place dedup replacement keeps the first-seen timestamp.
 - **Double-count prevention.** A Claude Code call routed through the proxy is

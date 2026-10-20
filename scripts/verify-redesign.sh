@@ -76,6 +76,9 @@ swiftc Sources/TokenScope/Models.swift \
   Sources/TokenScope/HTTPResponseFramer.swift \
   Sources/TokenScope/HTTPRequestScanner.swift \
   Sources/TokenScope/HTTPIdentityEncodingRewriter.swift \
+  Sources/TokenScope/TranscriptWatcher.swift \
+  Sources/TokenScope/ClaudeProjectRoots.swift \
+  Sources/TokenScope/ClaudeTranscriptParser.swift \
   tools/verify-store.swift \
   -o "$cache_root/store-checks"
 # Drives the real UsageStore against a scratch TOKENSCOPE_SUPPORT_DIR (never ~/Library).

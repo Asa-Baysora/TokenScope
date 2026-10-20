@@ -19,8 +19,10 @@ import Foundation
 /// - A line without `timestamp` inherits the previous timestamp seen in the same
 ///   file, else the file's mtime — never the wall clock.
 struct ClaudeTranscriptParser {
-    /// The single place the estimate ratio lives (measured ≈4 chars/token on
-    /// finalized messages across the corpus).
+    /// The single place the estimate ratio lives. This is a FLOOR, not an
+    /// average: visible bytes / 4 measured only ~0.41x of the exact output on
+    /// finalized messages, because thinking blocks are hidden from the transcript.
+    /// An estimated count therefore under-reads; that is why it is flagged "~".
     static let charsPerToken = 4
     static let advisorModelSuffix = " (advisor)"
     static let advisorFinishReason = "advisor_message"

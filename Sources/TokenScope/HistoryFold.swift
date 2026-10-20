@@ -18,11 +18,36 @@ enum HistoryFold {
             ?? now.addingTimeInterval(-Double(retentionDays) * 86400)
     }
 
+    /// MAX merge (`mergeByMax`) exists ONLY to protect against re-folding the SAME
+    /// records: a replayed overflow fold, or a journal record already folded at
+    /// runtime, lands on a bucket that already contains exactly those events, so
+    /// taking the larger value per field keeps the fold idempotent. It is wrong
+    /// for DIFFERENT messages (undercounts), so backfill never uses it.
+    static func mergeByMax(_ old: ProviderDayAgg, _ add: ProviderDayAgg) -> ProviderDayAgg {
+        ProviderDayAgg(
+            input: max(old.input, add.input), output: max(old.output, add.output),
+            cache: max(old.cache, add.cache), reasoning: max(old.reasoning, add.reasoning),
+            calls: max(old.calls, add.calls))
+    }
+
+    /// ADDITIVE merge (`mergeAdditive`) is for transcript backfill: each Claude root
+    /// (primary, Cowork, extras) holds DIFFERENT messages (zero message.id overlap),
+    /// so a root's backfilled day must be SUMMED into a day that already holds
+    /// another root's data. Idempotence comes from the per-root watermark (a root
+    /// is backfilled once per gap), not from the merge.
+    static func mergeAdditive(_ batch: [String: DayAgg], into history: inout [String: DayAgg]) {
+        for (k, v) in batch {
+            var d = history[k] ?? DayAgg()
+            d.merge(v)
+            history[k] = d
+        }
+    }
+
     /// Folds events into per-day history. Per (day, provider): if history already
     /// holds that bucket (a replayed overflow fold, or a journal record that was
-    /// already folded at runtime) the fold MERGES BY MAX PER FIELD instead of
-    /// summing, so re-folding the same events is idempotent. Shadowed events are
-    /// skipped. Returns one description per max-merged bucket, for logging.
+    /// already folded at runtime) the fold MERGES BY MAX PER FIELD (`mergeByMax`)
+    /// instead of summing, so re-folding the same events is idempotent. Shadowed
+    /// events are skipped. Returns one description per max-merged bucket, for logging.
     @discardableResult
     static func fold(_ events: [UsageEvent], into history: inout [String: DayAgg],
                      dayKey: (Date) -> String) -> [String] {
@@ -43,10 +68,7 @@ enum HistoryFold {
                 let old = d.providers[provider]
                 var merged = add
                 if let old {
-                    merged = ProviderDayAgg(
-                        input: max(old.input, add.input), output: max(old.output, add.output),
-                        cache: max(old.cache, add.cache), reasoning: max(old.reasoning, add.reasoning),
-                        calls: max(old.calls, add.calls))
+                    merged = mergeByMax(old, add)
                     conflicts.append("\(day)/\(provider)")
                 }
                 d.calls += merged.calls - (old?.calls ?? 0)
@@ -77,7 +99,8 @@ enum HistoryFold {
     }
 
     /// Where a freshly parsed transcript event goes. `watermark` is the persisted
-    /// history watermark (`backfillFrom` in the watchers). It is authoritative: an
+    /// history watermark of the event's ROOT (per-root since schema 3; `backfillFrom`
+    /// in the watchers). It is authoritative: an
     /// event below it is already inside history, even when the watermark sits ABOVE
     /// the live cutoff (an overflow fold advanced it), so it must not go live.
     enum Route: Equatable { case live, backfill, drop }
@@ -95,6 +118,9 @@ enum HistoryFold {
         var history: [String: DayAgg]
         var claudeThrough: Date
         var codexThrough: Date
+        /// Per-root Claude watermarks (root path -> date). Advanced together with
+        /// `claudeThrough`; empty for callers that predate per-root tracking.
+        var rootThrough: [String: Date] = [:]
     }
 
     /// Age-out + overflow trim. Whole-day age-out folds and advances the
@@ -123,6 +149,7 @@ enum HistoryFold {
             conflicts += fold(removed, into: &w.history, dayKey: dayKey)
             dropKeys(removed)
             w.claudeThrough = max(w.claudeThrough, cutoff)
+            for k in w.rootThrough.keys { w.rootThrough[k] = max(w.rootThrough[k] ?? cutoff, cutoff) }
             w.codexThrough = CodexHistory.advancedCodexWatermark(
                 current: w.codexThrough, through: cutoff, cutoff: cutoff,
                 foldedCodex: removed.contains { !$0.shadowed && $0.provider == .codex })
@@ -139,6 +166,7 @@ enum HistoryFold {
             conflicts += fold(removed, into: &w.history, dayKey: dayKey)
             dropKeys(removed)
             w.claudeThrough = max(w.claudeThrough, dayEnd)
+            for k in w.rootThrough.keys { w.rootThrough[k] = max(w.rootThrough[k] ?? dayEnd, dayEnd) }
             w.codexThrough = CodexHistory.advancedCodexWatermark(
                 current: w.codexThrough, through: dayEnd, cutoff: dayEnd,
                 foldedCodex: removed.contains { !$0.shadowed && $0.provider == .codex })

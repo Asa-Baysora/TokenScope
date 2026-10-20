@@ -635,10 +635,33 @@ provider-owned `loadedModels`, `runtimeHealth`, `history: [String: DayAgg]` (key
   their watermark via `store.claudeWatermark()` / `store.codexWatermark()` (main-queue FIFO with the merge write) so a
   replay cannot backfill twice. Logic lives in `CodexHistory.swift`
   (checks: `tools/verify-codex.swift`).
-- **History schema.** `daily-history.json` carries `schema` (now 2). Loading a file
+- **History schema.** `daily-history.json` carries `schema` (now 3). Loading a file
   with schema < 2 strips the `codex` provider from every day (recomputing `calls`),
   resets only the Codex watermark, and saves — once; the backfill rebuilds Codex from
   the rollout files.
+- **Per-root Claude watermarks (schema 3).** One shared watermark could not serve
+  several roots: a root added later (Cowork) had files older than it and was started at
+  EOF, so 78 days / 4,971 calls were never ingested. `daily-history.json` now also holds
+  `rootCompleteThrough: {rootPath: epoch}` (`UsageStore.rootHistoryCompleteThrough`).
+  The watcher bootstraps **per root**: a root's files with mtime >= its watermark are read
+  from offset 0; events `< eventsCutoff` and `>=` that root's watermark backfill, events
+  below it drop (`HistoryFold.route` gets the ROOT's watermark), events `>= cutoff` go
+  live (normal dedup). A root with no entry starts at `ancient` (now − 366 d). **Upgrade
+  from schema < 3:** `resolveRootWatermarks` seeds the primary and extra roots with the old
+  shared watermark and persists; Cowork post-dates schema 2, so it is "never seen". Until
+  seeded, `saveHistory` keeps writing schema 2 so a save can never strand a schema-3 file
+  with no entries (that would re-backfill the primary root and double it). Backfilled days
+  and their root watermarks advance in ONE main-queue block (`mergeHistorical(_:coveredRoots:coverThrough:)`);
+  `replayFinished(coverThrough:roots:)` gives every present root an entry. Age-out/overflow
+  folds advance all entries together. The global `historyCompleteThrough` is now the FLOOR
+  `min(root watermarks)`, still read by the journal partition and `isFolded`. A root removed
+  from the config keeps its entry. **Merge rules** (`HistoryFold`): `mergeAdditive` for
+  backfill (different roots hold different messages; idempotence = the per-root watermark);
+  `mergeByMax` only for `fold()` re-folding the same records.
+- **Deterministic files.** `daily-history.json` is encoded with `.sortedKeys`; the journal
+  rewrite sorts by (timestamp, key) with sorted-key lines; both writes are skipped when the
+  bytes equal what is on disk (an unchanged launch writes nothing; run N and N+1 are
+  byte-identical).
 
 ### 7.4 Double-count prevention (shadowing)
 A Claude Code call routed through the proxy is observed **twice** (proxy + transcript).
@@ -879,7 +902,11 @@ Menu-bar settings detail so removing the footer does not remove functionality.
 `MenuView(snapshotInline: true)` renders the active facet in the same fixed 304 pt
 viewport without `ScrollView`, because `NSScrollView` will not draw in `ImageRenderer`.
 `SNAPSHOT_LIMITS=all|three|two|one|none` injects deterministic rail fixtures for visual
-coverage without changing production data sources.
+coverage without changing production data sources. It waits (up to 30 s) for
+`store.replayComplete` (set by `replayFinished`), then settles 1.5 s for Codex/pollers,
+instead of a fixed 8 s sleep that under-waited on a first-run backfill. Env var semantics
+are unchanged. Usage-tab totals carry a leading `~` (+ tooltip) when any contributing
+call's output is estimated (`Totals.estimated`).
 
 ---
 
