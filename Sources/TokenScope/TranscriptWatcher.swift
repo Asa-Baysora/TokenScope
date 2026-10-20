@@ -39,7 +39,7 @@ final class TranscriptWatcher {
             self.store.replayFinished(coverThrough: self.cutoff)
         }
         let t = DispatchSource.makeTimerSource(queue: queue)
-        t.schedule(deadline: .now() + 3.0, repeating: 1.0)
+        t.schedule(deadline: .now() + 3.0, repeating: 1.0, leeway: .milliseconds(300))  // coalescing; logic counts ticks, not exact seconds
         t.setEventHandler { [weak self] in
             guard let self else { return }
             self.cutoff = self.store.eventsCutoff

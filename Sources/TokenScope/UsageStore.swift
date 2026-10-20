@@ -4,7 +4,16 @@ import Combine
 final class UsageStore: ObservableObject {
     static let retentionDays = HistoryFold.retentionDays   // 28 whole days; see HistoryFold
 
-    @Published private(set) var events: [UsageEvent] = []   // oldest → newest (sorted after replay)
+    // oldest → newest (kept sorted by ingest/merge; `events(in:)` binary-searches it).
+    // Every mutation (ingest, shadowing, trim, fold, replay sort) funnels through here,
+    // so the didSet is the single invalidation point for the today-totals cache.
+    @Published private(set) var events: [UsageEvent] = [] {
+        didSet { todayCache = nil }
+    }
+    /// menu-bar "tokens today" (input + output), valid for one calendar day and
+    /// until `events` next mutates. Not published: it is derived state.
+    private var todayCache: (dayStart: Date, tokens: Int)?
+    private var midnightTimer: Timer?
     @Published private(set) var liveCalls: [LiveCall] = []
     @Published var proxyStatus = "proxy starting…"
     @Published var proxyHealthy = false
@@ -96,6 +105,25 @@ final class UsageStore: ObservableObject {
         // History first: aged-out journal records fold into it during the journal load.
         loadHistory()
         loadPersistedLocalEvents()
+        scheduleMidnightRollover()
+    }
+
+    /// One-shot timer at the next local midnight: drops the today cache and bumps
+    /// `now` so the menu-bar total resets to the new day even when nothing else
+    /// publishes overnight (the clock timer only runs while calls are live).
+    private func scheduleMidnightRollover() {
+        midnightTimer?.invalidate()
+        let cal = Calendar.current
+        guard let next = cal.date(byAdding: .day, value: 1, to: cal.startOfDay(for: Date())) else { return }
+        let t = Timer(fire: next.addingTimeInterval(1), interval: 0, repeats: false) { [weak self] _ in
+            guard let self else { return }
+            self.todayCache = nil
+            self.now = Date()
+            self.scheduleMidnightRollover()
+        }
+        t.tolerance = 30
+        RunLoop.main.add(t, forMode: .common)
+        midnightTimer = t
     }
 
     /// The clock timer only runs while calls are in flight — it drives the live
@@ -628,13 +656,22 @@ final class UsageStore: ObservableObject {
 
     // MARK: - Aggregates
 
+    /// Non-shadowed events in the period. `events` is sorted by timestamp, so the
+    /// window start (and, for today, the day end) is found by binary search and only
+    /// that slice is filtered — not all ~18k events.
     func events(in period: StatsPeriod) -> [UsageEvent] {
         let cal = Calendar.current
-        if period == .today {
-            return events.filter { cal.isDateInToday($0.timestamp) && !$0.shadowed }
+        let dayStart = cal.startOfDay(for: Date())
+        let start = period == .today
+            ? dayStart
+            : (cal.date(byAdding: .day, value: -(period.days - 1), to: dayStart) ?? dayStart)
+        let lo = EventRange.firstIndex(in: events, timestamp: { $0.timestamp }, atOrAfter: start)
+        var hi = events.count
+        if period == .today, let dayEnd = cal.date(byAdding: .day, value: 1, to: dayStart) {
+            hi = EventRange.firstIndex(in: events, timestamp: { $0.timestamp }, atOrAfter: dayEnd)
         }
-        let start = cal.date(byAdding: .day, value: -(period.days - 1), to: cal.startOfDay(for: Date())) ?? Date()
-        return events.filter { $0.timestamp >= start && !$0.shadowed }
+        guard lo < hi else { return [] }
+        return events[lo..<hi].filter { !$0.shadowed }
     }
 
     func totals(for provider: UsageOrigin?, in period: StatsPeriod) -> Totals {
@@ -786,7 +823,17 @@ final class UsageStore: ObservableObject {
         if let live = liveCalls.last, now.timeIntervalSince(live.lastUpdate) < 8 {
             return "↓\(Fmt.compact(live.outputTokens))"
         }
-        let t = totals(for: nil, in: .today)
-        return Fmt.compact(t.input + t.output)
+        return Fmt.compact(todayTokens)
+    }
+
+    /// Today's input + output, cached per (calendar day, events mutation).
+    private var todayTokens: Int {
+        let dayStart = Calendar.current.startOfDay(for: Date())
+        if let c = todayCache, c.dayStart == dayStart { return c.tokens }
+        var t = Totals()
+        for e in events(in: .today) { t.add(e) }
+        let tokens = t.input + t.output
+        todayCache = (dayStart, tokens)
+        return tokens
     }
 }

@@ -32,18 +32,34 @@ enum FileLog {
     // Held open across writes (all serialized on `queue`) so logging isn't an
     // open/seek/write/close syscall storm.
     private static var handle: FileHandle?
+    // Bytes in the current file; capped at ~1 MB with one rotated `.1` copy
+    // (LogRotator) so the log can't grow without bound.
+    private static var size = 0
+
+    private static func open() {
+        LogRotator.rotateIfNeeded(url: url)
+        if !FileManager.default.fileExists(atPath: url.path) {
+            FileManager.default.createFile(atPath: url.path, contents: nil)
+        }
+        handle = try? FileHandle(forWritingTo: url)
+        size = Int((try? handle?.seekToEnd()) ?? 0)
+    }
 
     static func log(_ message: String) {
         queue.async {
             let line = "\(stamp.string(from: Date())) \(message)\n"
-            if handle == nil {
-                if !FileManager.default.fileExists(atPath: url.path) {
-                    FileManager.default.createFile(atPath: url.path, contents: nil)
-                }
-                handle = try? FileHandle(forWritingTo: url)
-                _ = try? handle?.seekToEnd()
+            if handle == nil { open() }
+            let data = Data(line.utf8)
+            try? handle?.write(contentsOf: data)
+            size += data.count
+            if size > LogRotator.defaultMaxBytes {
+                try? handle?.close()
+                handle = nil
+                open()   // rotates (size > cap), then reopens a fresh file
+                let note = Data("\(stamp.string(from: Date())) log rotated (previous: TokenScope.log.1)\n".utf8)
+                try? handle?.write(contentsOf: note)
+                size += note.count
             }
-            try? handle?.write(contentsOf: Data(line.utf8))
         }
     }
 }

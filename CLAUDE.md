@@ -27,13 +27,14 @@ swift build -c release                       # compile
 ./build-app.sh                               # build TokenScope.app (bundle + icon)
 
 # Pure regression suites (framework-free so CommandLineTools-only Macs work):
-swiftc Sources/TokenScope/Models.swift Sources/TokenScope/LimitRailPresentation.swift Sources/TokenScope/EventReconciler.swift Sources/TokenScope/PerformanceAggregator.swift Sources/TokenScope/ProcessReaper.swift Sources/TokenScope/Fmt.swift tools/verify-models.swift -o /tmp/tokenscope-model-checks && /tmp/tokenscope-model-checks
+swiftc Sources/TokenScope/Models.swift Sources/TokenScope/LimitRailPresentation.swift Sources/TokenScope/EventReconciler.swift Sources/TokenScope/PerformanceAggregator.swift Sources/TokenScope/ProcessReaper.swift Sources/TokenScope/Fmt.swift Sources/TokenScope/PollSupport.swift tools/verify-models.swift -o /tmp/tokenscope-model-checks && /tmp/tokenscope-model-checks
 swiftc Sources/TokenScope/Models.swift Sources/TokenScope/HTTPRequestScanner.swift Sources/TokenScope/HTTPIdentityEncodingRewriter.swift Sources/TokenScope/HTTPResponseFramer.swift Sources/TokenScope/ResponseScanner.swift tools/verify-protocols.swift -o /tmp/tokenscope-protocol-checks && /tmp/tokenscope-protocol-checks
 swiftc Sources/TokenScope/Models.swift Sources/TokenScope/LMStudioEventParser.swift tools/verify-lmstudio.swift -o /tmp/tokenscope-lmstudio-checks && /tmp/tokenscope-lmstudio-checks
 swiftc Sources/TokenScope/ClaudeProjectRoots.swift tools/verify-claude-roots.swift -o /tmp/tokenscope-roots-checks && /tmp/tokenscope-roots-checks
 swiftc Sources/TokenScope/Models.swift Sources/TokenScope/CodexHistory.swift tools/verify-codex.swift -o /tmp/tokenscope-codex-checks && /tmp/tokenscope-codex-checks
 swiftc Sources/TokenScope/Models.swift Sources/TokenScope/EventReconciler.swift Sources/TokenScope/ClaudeTranscriptParser.swift tools/verify-transcript.swift -o /tmp/tokenscope-transcript-checks && /tmp/tokenscope-transcript-checks
 swiftc Sources/TokenScope/Models.swift Sources/TokenScope/CodexHistory.swift Sources/TokenScope/HistoryFold.swift tools/verify-window.swift -o /tmp/tokenscope-window-checks && /tmp/tokenscope-window-checks
+swiftc Sources/TokenScope/PollSupport.swift tools/verify-lightness.swift -o /tmp/tokenscope-lightness-checks && /tmp/tokenscope-lightness-checks   # backoff, publish-on-change, today binary search, log rotation
 # read-only corpus sanity: /tmp/tokenscope-transcript-checks --corpus ~/.claude/projects/<project-dir>
 
 # VERIFY UI BEFORE INSTALLING — render the menu with real data:
@@ -162,11 +163,18 @@ reason (`MenuView(snapshotInline: true)`).
 
 ## Efficiency (it's a 24/7 menu-bar app — keep idle cost ~0)
 
-Measured idle footprint (2026-06-11, ~7.9k events in window): **~0.2% CPU**
-average (most samples 0.0%, brief sub-2% blips from the 1 s hot-file check and
-pollers), **~165 MB RSS** (almost all SwiftUI/AppKit baseline — our data is a
-couple MB), 8 threads, ~7 KB log. CPU is the metric to guard; memory is
-framework baseline and not cheaply reducible without leaving SwiftUI.
+Measured footprint (installed v0.1.7, 2026-10-19, 4d20h uptime, ~17.7k events in
+window): **~0.6% CPU lifetime average**, 2.5–2.9% while a session is writing
+(the old "~0.2%" figure was from 2026-06-11 with ~7.9k events). The measured
+hot spot was `menuTitle` filtering every event with `Calendar.isDateInToday` on
+each scene re-run (141 ms of a 219 ms/20 s sample), plus limits/status pollers
+re-publishing unchanged values every 1–5 min. **Target after the lightness work
+(binary-searched + cached today total, publish-on-change pollers, backoff, 1 MB
+log cap, 0.3 s watcher timer leeway): back to ~0.2% average, ≲1% while a session
+writes — not yet re-measured against an installed build.** ~165 MB RSS (almost
+all SwiftUI/AppKit baseline), 8 threads, log capped at ~1 MB + one `.1` copy
+(was 7 MB / 104k lines, 63k of them `limits:`). CPU is the metric to guard;
+memory is framework baseline and not cheaply reducible without leaving SwiftUI.
 
 Idle CPU must stay near zero. Measured regressions that were fixed; don't undo:
 - **TranscriptWatcher** stats only recently-modified ("hot") files each second
@@ -175,11 +183,27 @@ Idle CPU must stay near zero. Measured regressions that were fixed; don't undo:
 - **UsageStore's clock timer runs only while calls are live** (`startTickingIfNeeded`),
   stopping itself when `liveCalls` empties — no idle wakeups recomputing the label.
 - **FileLog holds one file handle open** and does NOT log per-event (per-event at
-  replay scale produced a 17 MB / 178k-line log). Lifecycle summaries only.
-- Pollers: limits/status 5 min, Ollama health + `/api/ps` 10 s, LM Studio status +
-  loaded models 30 s. Ollama Desktop DB/WAL observation is vnode-driven and debounced.
-  Don't add per-second work.
-- **Publish only on significant change.** `updateRuntimeHealth` gates on
+  replay scale produced a 17 MB / 178k-line log). Lifecycle summaries only, and
+  pollers log only on change / state transition (ok→error, error→ok), never per poll.
+  Capped at ~1 MB: truncate-and-rename to `TokenScope.log.1` on the logging queue
+  (`LogRotator`, checked in `tools/verify-lightness.swift`).
+- Pollers: Claude limits 60 s, ChatGPT limits 60 s, status 5 min, Ollama health +
+  `/api/ps` 10 s, LM Studio status + loaded models 30 s. Claude/ChatGPT limits and
+  status back off after 3 consecutive failures (interval doubles, cap 30 min, reset
+  on success; `PollScheduler`/`PollBackoff` in `PollSupport.swift`; the backed-off
+  state shows in the error text the limits card displays). Ollama Desktop DB/WAL
+  observation is vnode-driven and debounced. Don't add per-second work. The 1 s
+  watcher timers carry 0.3 s leeway (coalescing) — watcher logic counts ticks, never
+  assumes an exact 1 s cadence.
+- **Today total is cached, not re-filtered.** `events` is sorted, so
+  `events(in:)` binary-searches the window start (`EventRange`), and `menuTitle`
+  reads a cache keyed on (calendar day) and cleared by `events.didSet` (any
+  ingest/shadow/trim/fold) and a one-shot midnight timer. Never filter all events
+  per scene re-run.
+- **Publish only on significant change.** Limits/status managers follow the same
+  rule (`LimitWindow.displayEquals`: 0.1 pt, 1 s): assign only when different;
+  `lastUpdated` moves only on a changed payload, first fetch, or recovery from a
+  failure (not every identical poll). `updateRuntimeHealth` gates on
   `RuntimeHealth.significantlyDiffers` (excludes the `lastSuccess`/`lastEvent`
   heartbeats — kept in a non-published pulse map, overlaid by the computed
   `runtimeHealth`); `setLoadedModels` gates on `LoadedModel.displayEquals`

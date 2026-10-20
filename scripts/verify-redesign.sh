@@ -18,6 +18,7 @@ swiftc Sources/TokenScope/Models.swift \
   Sources/TokenScope/PerformanceAggregator.swift \
   Sources/TokenScope/ProcessReaper.swift \
   Sources/TokenScope/Fmt.swift \
+  Sources/TokenScope/PollSupport.swift \
   tools/verify-models.swift \
   -o "$cache_root/model-checks"
 "$cache_root/model-checks"
@@ -62,6 +63,11 @@ swiftc Sources/TokenScope/Models.swift \
   Sources/TokenScope/HistoryFold.swift \
   tools/verify-window.swift \
   -o "$cache_root/window-checks"
+
+swiftc Sources/TokenScope/PollSupport.swift \
+  tools/verify-lightness.swift \
+  -o "$cache_root/lightness-checks"
+"$cache_root/lightness-checks"
 "$cache_root/window-checks"
 
 if [[ "${CLI_ONLY:-0}" == "1" ]]; then

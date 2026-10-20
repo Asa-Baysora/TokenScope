@@ -235,7 +235,7 @@ how it feeds the store → privacy → limitations.** Source file named in the h
   (starts 3s after launch, then every **1 s**). Tracks a per-file **byte offset**;
   only advances past **complete lines** (a trailing partial line is left for next
   tick). Stats only recently-modified ("hot") files each tick; a full directory walk
-  runs every **10th** tick (idle-CPU discipline — see [§15](#15-footprint-and-efficiency-invariants)).
+  runs every **10th** tick (the timer carries 0.3 s leeway, so the cadence is ~1 s, not exact; idle-CPU discipline — see [§15](#15-footprint-and-efficiency-invariants)).
 - **Byte pre-filters (before any JSON decode):** a line is decoded as a usage event
   only if it contains the literal bytes `"assistant"` (`assistantMarker`); title
   extraction keys off `"ai-title"`, `"summary"`, and a user marker (the first two are
@@ -466,7 +466,9 @@ toggle + login-persistent setup is the planned feature pass.
   reads `utilization` (Double|Int→Double, default 0) and `resets_at` (ISO8601, with or
   without fractional seconds). Produces `LimitWindow`s labeled `"Session · 5h"`,
   `"Weekly · 7d"`, `"Weekly Sonnet · 7d"`.
-- **Timing:** `start()` polls every **60 s** and refreshes immediately.
+- **Timing:** `start()` polls every **60 s** (a `PollScheduler`) and refreshes
+  immediately; 3 consecutive failures start doubling the interval (cap 30 min), a
+  success resets it. Logs only on change/transition.
 - **UI-facing:** `@Published windows, connected, lastUpdated, errorMessage,
   notificationsEnabled`; computed `sessionPercent` (`five_hour`), `weeklyPercent`
   (`seven_day`). Also the app-wide **color ramp** lives here — see
@@ -504,7 +506,10 @@ observed window minutes (`Nd` / `Nh` / `Nm` / `"limit"`). Gated on
   window seconds/minutes (`window_seconds`/`window_minutes`/…), and reset
   (`resets_at`/`reset_at`/`reset_time`, epoch or ISO8601). Dedups, sorts by window
   length, takes the first two → primary/secondary.
-- **Timing:** polls every **60 s** while active; `stop()` when cookie is not the
+- **Timing:** polls every **60 s** while active (`PollScheduler`); after 3 consecutive
+  failures — including "No recognized limits returned", which this endpoint has
+  returned since 2026-08-07 — the interval doubles to a 30 min cap and the error text
+  says "(retrying every N min)"; success resets. `stop()` when cookie is not the
   selected source.
 - **Degradation:** distinct strings for signed-out (`"Signed out on chatgpt.com — …"`),
   rejected cookie, HTTP errors, and "No recognized limits returned — ChatGPT's web
@@ -525,7 +530,8 @@ watcher always runs for local per-turn token tracking.
 
 - **Endpoints (public, no auth):**
   `GET https://status.claude.com/api/v2/summary.json` and
-  `.../status.openai.com/...`, every **300 s** (5 min), `timeoutInterval = 15`,
+  `.../status.openai.com/...`, every **300 s** (5 min; backs off on failure like the
+  limits pollers), `timeoutInterval = 15`,
   `cachePolicy = .reloadIgnoringLocalCacheData`.
 - **Parse:** `status.{indicator, description}`; `components[]` (drop `operational`,
   drop `group == true`); `incidents[]` (drop `resolved`/`postmortem`, `update` = first
@@ -1022,22 +1028,51 @@ clean-build, verify (version prints, watchers start, app stays alive), zip the a
 ## 15. Footprint and efficiency invariants
 
 It runs 24/7, so idle cost is a design constraint. Measured idle (~7.9k events in
-window): **~0.2% CPU** (mostly 0.0%), **~165 MB RSS** (SwiftUI/AppKit baseline; our
-data is a couple MB), 8 threads, ~7 KB log. **CPU is the metric to guard.** Do not undo:
+window, 2026-06-11): ~0.2% CPU. **Re-measured 2026-10-19** (v0.1.7, ~17.7k events,
+4d20h uptime): **~0.6% lifetime-average CPU**, 2.5–2.9% while a session writes; the
+cost was `menuTitle` re-filtering all events with `Calendar.isDateInToday` on every
+scene re-run plus unchanged-value publishes from the pollers. The lightness work below
+targets ~0.2% average / ≲1% under write (not yet re-measured on an installed build).
+~165 MB RSS (SwiftUI/AppKit baseline), 8 threads, log capped ~1 MB + one `.1` copy.
+**CPU is the metric to guard.** Do not undo:
 - **TranscriptWatcher/CodexWatcher** stat only recently-modified ("hot") files each
   second; a full directory walk runs every 10th tick (a full stat of ~300 files/sec was
   ~3–20% idle CPU).
 - **UsageStore's clock timer runs only while calls are live** and stops itself when
   `liveCalls` empties — no idle wakeups recomputing the label.
-- **FileLog** holds one handle open and logs lifecycle only, never per-event.
-- **Poll cadence:** limits 60 s, ChatGPT limits 60 s, status 300 s, Ollama health/models 10 s,
-  LM Studio health/models 30 s, transcript/codex 1 s (hot-file only), LM Studio relaunch backoff 30 s. Don't add
-  per-second work.
+- **FileLog** holds one handle open and logs lifecycle only, never per-event; pollers
+  log only on change or state transition. Rotation: when the file passes ~1 MB (also
+  checked at open) it is closed and renamed to `TokenScope.log.1` (replacing any older
+  copy; a file >2 MB keeps only its last ~1 MB of whole lines), then a fresh file opens
+  with a "log rotated" line — all on the logging queue (`LogRotator`, `PollSupport.swift`).
+- **Today total** (menu-bar label): `events` is kept sorted, so `events(in:)` finds the
+  window start/end with a binary search (`EventRange.firstIndex`) and filters only that
+  slice; `menuTitle` reads `todayCache` keyed on the calendar day, cleared by
+  `events.didSet` (every ingest/shadow/trim/fold/replay sort) and by a one-shot midnight
+  timer that also bumps `now` so the label rolls over while idle.
+- **Poll backoff:** `PollBackoff` (pure) / `PollScheduler` (one-shot `Timer`, 10%
+  tolerance, re-arms on every fire and every success/failure report). After 3
+  consecutive failures the interval doubles (60 → 120 → 240 → … → 1800 s cap; status
+  300 → 600 → … 1800); one success resets. Used by Claude limits, ChatGPT limits and
+  both status pollers; the backed-off state is appended to the error text the limits
+  card shows ("… (retrying every 8 min)"). Ollama/LM Studio pollers are local and keep
+  fixed cadences.
+- **Poll cadence:** Claude limits 60 s (not 5 min), ChatGPT limits 60 s, status 300 s (all
+  three back off on failure, see below), Ollama health/models 10 s, LM Studio
+  health/models 30 s, transcript/codex 1 s with 0.3 s timer leeway (hot-file only; the
+  180 s hot window and 10-tick full walk count ticks/wall time, not an exact 1 s
+  cadence), LM Studio relaunch backoff 30 s. Don't add per-second work.
 - **Publish only on significant change** (2026-07-14, fixed a ~0.2%→~2% idle-CPU
   regression): `updateRuntimeHealth` gates on `RuntimeHealth.significantlyDiffers`,
   which excludes the `lastSuccess`/`lastEvent` heartbeats — those live in a
   non-published pulse map and are overlaid by the computed `runtimeHealth` at read
   time, so the UI still shows fresh values whenever it renders. `setLoadedModels`
+  Limits/status managers follow the same rule: values are assigned only when they
+  differ (`LimitWindow.displayEquals` compares utilization at 0.1 pt and reset at 1 s;
+  status compares indicator/summary/components/incidents). `lastUpdated` moves only on
+  a changed payload, the first fetch, or recovery after a failure — **not** on every
+  identical poll (nothing displays it; `OpenAILimitsManager` keeps its newest-observation
+  watermark in a non-published `observedAt`). `setLoadedModels`
   gates on `LoadedModel.displayEquals`, which excludes Ollama's `expiresAt`
   keep-alive countdown (displayed nowhere). An unconditional publish re-runs the
   SwiftUI scene body and re-rasterizes the menu-bar bitmap (ImageRenderer) — at a
@@ -1151,6 +1186,7 @@ the rationale lives here.
 | `LMStudioLogWatcher.swift` / `LMStudioEventParser.swift` | output-only model telemetry + privacy-boundary parser |
 | `LMStudioCLI.swift` / `LMStudioStatusPoller.swift` | bounded CLI execution + LM runtime/model health |
 | `OllamaStatusPoller.swift` | `/api/version` health + `/api/ps` resident-model poll |
+| `PollSupport.swift` | `LimitWindow` + display comparator, `PollBackoff`/`PollScheduler`, `EventRange` binary search, `LogRotator` (Foundation-only; checked by `tools/verify-lightness.swift`) |
 | `LimitsManager.swift` | claude.ai usage + the shared percent→color ramp |
 | `OpenAILimitsManager.swift` | local Codex quota (event-driven `observe`) |
 | `ChatGPTLimitsManager.swift` | ChatGPT web usage (cookie→bearer, defensive parse) |

@@ -12,7 +12,10 @@ final class ChatGPTLimitsManager: ObservableObject {
     @Published var errorMessage: String?
 
     private var cookie = ""
-    private var timer: Timer?
+    // 60 s base; this endpoint has been failing for weeks, so after 3 consecutive
+    // failures the interval doubles (120 s, 240 s, … cap 30 min) until a success.
+    private let scheduler = PollScheduler(base: 60)
+    private var lastLoggedError: String?
     // Shared with the local source: same notif preference + threshold bands, so
     // whichever source is active fires the "Codex limit thresholds" alerts and
     // switching sources doesn't re-fire an already-notified band.
@@ -33,17 +36,26 @@ final class ChatGPTLimitsManager: ObservableObject {
     }
 
     func start() {
-        guard timer == nil else { refresh(); return }
-        timer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
-            self?.refresh()
+        guard !scheduler.isRunning else { refresh(); return }
+        scheduler.start { [weak self] in self?.refresh() }
+    }
+
+    /// Publish-on-change error plumbing (see LimitsManager.fail): assign only when
+    /// the text differs, log on transition/new message, and show the backoff state
+    /// in the message the gauge card/tooltip already displays.
+    private func fail(_ message: String) {
+        let first = scheduler.failed()
+        let shown = message + (scheduler.note.map { " (\($0))" } ?? "")
+        if errorMessage != shown { errorMessage = shown }
+        if first || message != lastLoggedError {
+            lastLoggedError = message
+            FileLog.log("chatgpt limits: error — \(message)")
         }
-        refresh()
     }
 
     /// Stop polling when the cookie is not the selected Codex source.
     func stop() {
-        timer?.invalidate()
-        timer = nil
+        scheduler.stop()
     }
 
     func setCookie(_ raw: String) {
@@ -82,18 +94,18 @@ final class ChatGPTLimitsManager: ObservableObject {
             DispatchQueue.main.async {
                 guard let self else { return }
                 if let error {
-                    self.errorMessage = "Network error: \(error.localizedDescription)"
+                    self.fail("Network error: \(error.localizedDescription)")
                     completion(nil); return
                 }
                 let code = (response as? HTTPURLResponse)?.statusCode ?? 0
                 guard code == 200, let data,
                       let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-                    self.errorMessage = "Cookie rejected (expired?) — re-copy it"
+                    self.fail("Cookie rejected (expired?) — re-copy it")
                     completion(nil); return
                 }
                 guard let token = obj["accessToken"] as? String, !token.isEmpty else {
                     // 200 with no token = signed out for this cookie's session.
-                    self.errorMessage = "Signed out on chatgpt.com — open ChatGPT in the browser, then re-copy the Cookie"
+                    self.fail("Signed out on chatgpt.com — open ChatGPT in the browser, then re-copy the Cookie")
                     completion(nil); return
                 }
                 completion(token)
@@ -110,17 +122,17 @@ final class ChatGPTLimitsManager: ObservableObject {
             guard let self else { return }
             DispatchQueue.main.async {
                 if let error {
-                    self.errorMessage = "Network error: \(error.localizedDescription)"
+                    self.fail("Network error: \(error.localizedDescription)")
                     return
                 }
                 guard let response = response as? HTTPURLResponse else {
-                    self.errorMessage = "No response"
+                    self.fail("No response")
                     return
                 }
                 guard response.statusCode == 200, let data else {
-                    self.errorMessage = response.statusCode == 401 || response.statusCode == 403
+                    self.fail(response.statusCode == 401 || response.statusCode == 403
                         ? "ChatGPT rejected the request (session expired?) — re-copy the Cookie"
-                        : "ChatGPT usage unavailable (HTTP \(response.statusCode))"
+                        : "ChatGPT usage unavailable (HTTP \(response.statusCode))")
                     return
                 }
                 self.parse(data)
@@ -161,7 +173,7 @@ final class ChatGPTLimitsManager: ObservableObject {
     /// and Weekly (longer), mirroring Claude.
     private func parse(_ data: Data) {
         guard let root = try? JSONSerialization.jsonObject(with: data) else {
-            errorMessage = "Couldn't parse ChatGPT usage response"
+            fail("Couldn't parse ChatGPT usage response")
             return
         }
         var raws: [RawWindow] = []
@@ -169,7 +181,7 @@ final class ChatGPTLimitsManager: ObservableObject {
         var seen = Set<String>()
         let distinct = raws.filter { seen.insert("\($0.minutes ?? -1):\($0.percent)").inserted }
         let sorted = distinct.sorted { ($0.minutes ?? Int.max) < ($1.minutes ?? Int.max) }
-        windows = sorted.prefix(2).enumerated().map { index, r in
+        let newWindows: [LimitWindow] = sorted.prefix(2).enumerated().map { index, r in
             let session = index == 0
             let period = r.minutes.map { Self.duration($0) } ?? "limit"
             return LimitWindow(
@@ -179,12 +191,23 @@ final class ChatGPTLimitsManager: ObservableObject {
                 resetsAt: r.reset,
                 period: period)
         }
-        lastUpdated = Date()
-        errorMessage = windows.isEmpty
-            ? "No recognized limits returned — ChatGPT's web response may have changed"
-            : nil
+        guard !newWindows.isEmpty else {
+            if !windows.isEmpty { windows = [] }
+            fail("No recognized limits returned — ChatGPT's web response may have changed")
+            return
+        }
+        // Publish only on change; `lastUpdated` moves on a changed payload, the
+        // first fetch, or recovery after a failure (not on identical polls).
+        let recovered = scheduler.succeeded()
+        let changed = !LimitWindow.displayEqual(windows, newWindows)
+        if changed { windows = newWindows }
+        if changed || recovered || lastUpdated == nil { lastUpdated = Date() }
+        if errorMessage != nil { errorMessage = nil }
+        lastLoggedError = nil
         maybeNotify()
-        FileLog.log("chatgpt limits: \(windows.map { "\($0.id)=\(Int($0.utilization))%" }.joined(separator: " "))")
+        if changed || recovered {
+            FileLog.log("chatgpt limits: \(windows.map { "\($0.id)=\(Int($0.utilization))%" }.joined(separator: " "))")
+        }
     }
 
     private func maybeNotify() {

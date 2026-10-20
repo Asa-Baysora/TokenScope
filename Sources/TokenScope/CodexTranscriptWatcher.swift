@@ -97,7 +97,7 @@ final class CodexTranscriptWatcher {
             self?.finishBackfillIfNeeded()
         }
         let t = DispatchSource.makeTimerSource(queue: queue)
-        t.schedule(deadline: .now() + 3, repeating: 1)
+        t.schedule(deadline: .now() + 3, repeating: 1, leeway: .milliseconds(300))  // coalescing; logic counts ticks, not exact seconds
         t.setEventHandler { [weak self] in self?.scan() }
         t.resume()
         timer = t
