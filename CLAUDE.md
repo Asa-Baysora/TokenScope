@@ -100,7 +100,10 @@ reason (`MenuView(snapshotInline: true)`).
   `schema` < 2 triggers a one-time Codex strip + rebuild. Rules in `CodexHistory.swift`.
 - **Byte-level pre-filters** in `TranscriptWatcher.parse` (`"assistant"`,
   `"type":"summary"`, `"type":"user"` markers) keep the 30-day replay fast.
-  Don't JSON-decode every line.
+  Don't JSON-decode every line. They are SIMD scans over the raw chunked read buffer
+  (`TranscriptIO`): no per-line `Data` copies, no `readToEnd()` of whole files, no
+  per-line `ISO8601DateFormatter` (`FastTimestamp`). Launch replay batches store ingest
+  (`ingest(batch:)`, 500 events); live tailing stays per-line.
 - **The proxy is a transparent TCP relay.** It never rewrites response bytes;
   the only request mutation is forcing `Accept-Encoding: identity` so responses
   stay scannable. Request and response transport use bounded HTTP/1.1 framing

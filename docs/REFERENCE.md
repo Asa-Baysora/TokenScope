@@ -227,7 +227,7 @@ how it feeds the store → privacy → limitations.** Source file named in the h
 ### 6.1 Claude Code transcripts — `TranscriptWatcher.swift`
 
 - **Reads:** `~/.claude/projects/<project>/<session>.jsonl` plus any
-  `ExtraClaudeProjectDirs` roots (`ClaudeProjectRoots.swift`; for `CLAUDE_CONFIG_DIR`
+  built-in Cowork root + `ExtraClaudeProjectDirs` roots (`ClaudeProjectRoots.swift`; for `CLAUDE_CONFIG_DIR`
   sessions) via one enumeration loop, re-resolved on each full walk. Every API response Claude
   Code receives is appended here with exact usage. Covers **native Anthropic and
   Claude Code → Ollama** with no configuration.
@@ -238,8 +238,36 @@ how it feeds the store → privacy → limitations.** Source file named in the h
   runs every **10th** tick (idle-CPU discipline — see [§15](#15-footprint-and-efficiency-invariants)).
 - **Byte pre-filters (before any JSON decode):** a line is decoded as a usage event
   only if it contains the literal bytes `"assistant"` (`assistantMarker`); title
-  extraction keys off `"ai-title"`, `"summary"`, and a user marker. This keeps the
-  30-day replay fast.
+  extraction keys off `"ai-title"`, `"summary"`, and a user marker (the first two are
+  only searched in lines <= 16 KB; titles are tiny). Markers are `TranscriptIO.Needle`s
+  searched with a 16-byte SIMD scan over the raw read buffer (`TranscriptIO.contains`;
+  libc `memmem` was ~half of the replay's remaining time), and a `Data` wrapper is only
+  built for a line that hits. This keeps the 30-day replay fast.
+- **I/O (`TranscriptIO.swift`, shared with the Codex watcher):** files are read with
+  `pread` in 2 MB chunks (`forEachLine`), newlines found with `memchr`, each complete
+  line handed to the parser straight out of the buffer. A partial trailing line is a
+  carry-over that is moved to the front of the buffer; the buffer doubles for lines
+  longer than a chunk (max observed 4.46 MB), so peak memory is ~one chunk or twice the
+  longest line, not the file. Returned offset = first byte after the last complete line
+  (partial tail re-read next tick). One `autoreleasepool` per file. Per-file values
+  (path, session stem, lazily-resolved mtime) are computed once per read in a
+  `FileContext`, not per line.
+- **Timestamps:** `FastTimestamp.parse` (in `ClaudeTranscriptParser.swift`) is a
+  hand-rolled parser for the fixed `yyyy-MM-ddTHH:mm:ss.SSSZ` form; anything else falls
+  back to `ISO8601DateFormatter`. Carry-forward / mtime fallbacks are unchanged.
+- **Replay batching:** while the initial replay runs (`bulkReplay`), events are
+  accumulated on the watcher queue and handed to `UsageStore.ingest(batch:)` every 500
+  events and at the end (Codex does the same for its launch/refresh replays). The store
+  folds repeats inside the batch and against existing keys with
+  `EventReconciler.preferred` (identical semantics to the per-event path), merges new
+  events chronologically with one pass (`EventMerge.merge`), publishes `events` once and
+  trims once. The per-event live matcher `reconcileDuplicates` is NOT run for batches:
+  `replayFinished` performs the full proxy/desktop shadowing pass over the whole window
+  afterwards. Live tailing after replay stays per-line (`addTranscriptEvent`).
+- **Measure it:** `tools/bench-transcript.swift` (build line in its header) times a full
+  read+parse of `~/.claude/projects` and prints a result checksum; run under
+  `/usr/bin/time -l` for peak RSS. Use `BENCH_QUIET_MIN=15` so repeat runs see identical
+  bytes. 954 MB / 156k lines: 7.0 s / 1.5 GB RSS before, 1.9 s / 82 MB after.
 - **Usage parse:** decodes `type == "assistant"`, reads `message.model` and
   `message.usage.{input_tokens, output_tokens, cache_read_input_tokens,
   cache_creation_input_tokens}` (logic in `ClaudeTranscriptParser.swift`, unit-tested by
@@ -899,6 +927,7 @@ View-bound; the rest are read directly.
 |---|---|---|---|
 | `ProxyPort` | Int | `11435` | proxy listen port |
 | `OllamaPort` | Int | `11434` | Ollama upstream port |
+| `IncludeCoworkSessions` | Bool | `true` | include the built-in Claude Cowork / Desktop agent-session root `~/Library/Application Support/Claude/local-agent-mode-sessions` (second root: after `~/.claude/projects`, before extras; only when the directory exists; deduped against `ExtraClaudeProjectDirs`). Treated like the primary root at launch (history replayed within the window); `audit.jsonl` files there are skipped because they duplicate the session/`subagents` transcripts. Labelled "Cowork" (`ClaudeProjectRoots.Kind`). `defaults write com.tokenscope IncludeCoworkSessions -bool false` to opt out; restart to apply. |
 | `ExtraClaudeProjectDirs` | [String] | `[]` | extra Claude Code transcript roots (absolute, `~` ok) for `CLAUDE_CONFIG_DIR` sessions (`<dir>/projects`); additive to `~/.claude/projects`, deduped after `~`/path standardisation, missing dirs skipped and re-checked on the 10 s full walk; entries are symlink-resolved, `<dir>` is mapped to `<dir>/projects` when that exists, `/` and `$HOME` are rejected. Restart TokenScope to import existing history from a newly added root; before restart only new activity is counted. History older than the 28-day window is never backfilled for roots added later. e.g. `defaults write com.tokenscope ExtraClaudeProjectDirs -array "~/Projects/local-llm-subagents/lean-config/projects"` |
 | `CodexSource` | String | `""` (auto) | `local` \| `cookie` \| `""` |
 | `CodexMonitoringEnabled` | Bool | `true` | local Codex scan on/off |
@@ -935,7 +964,7 @@ View-bound; the rest are read directly.
   limits, status, folds/backfills). **Not** per-event (that produced a 17 MB log). One
   file handle held open, serialized on a dedicated queue. First place to look when
   verifying behavior.
-- **Read-only inputs:** `~/.claude/projects/**/*.jsonl` (+ `ExtraClaudeProjectDirs` roots), `~/.codex/sessions/**/*.jsonl`,
+- **Read-only inputs:** `~/.claude/projects/**/*.jsonl` (+ Cowork `local-agent-mode-sessions` root, + `ExtraClaudeProjectDirs` roots), `~/.codex/sessions/**/*.jsonl`,
   `~/.lmstudio/bin/lms` (spawned). Codex raw logs are never modified.
 
 ---
@@ -1037,7 +1066,9 @@ the rationale lives here.
 4. **Transcript dedup = `message.id:requestId`, strongest wins.** A final rewrite must
    upgrade partial usage and a stale replay must not downgrade it.
 5. **Byte pre-filters before JSON decode** (`"assistant"`, `"token_count"`,
-   `"session_meta"`, …) — keep them; they make the 30-day replay fast.
+   `"session_meta"`, …) — keep them; they make the 30-day replay fast. They run as SIMD
+   scans over the raw read buffer (`TranscriptIO.contains`); don't wrap every line in
+   `Data` or use `Data.range`/`firstIndex` in the read loop.
 6. **The proxy never rewrites response bytes**; the only mutation is forcing
    `Accept-Encoding: identity`. Gzip would blind the scanner.
 7. **Skip `model == "<synthetic>"`** transcript lines.

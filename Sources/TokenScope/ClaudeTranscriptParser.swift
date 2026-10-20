@@ -64,7 +64,7 @@ struct ClaudeTranscriptParser {
 
         var ts: Date
         if let s = obj["timestamp"] as? String,
-           let d = Self.isoFrac.date(from: s) ?? Self.iso.date(from: s) {
+           let d = FastTimestamp.parse(s) ?? Self.isoFrac.date(from: s) ?? Self.iso.date(from: s) {
             ts = d
             lastTimestamp[fileKey] = d
         } else if let prev = lastTimestamp[fileKey] {
@@ -148,5 +148,49 @@ struct ClaudeTranscriptParser {
             return (h, d.count)
         }
         return ("\(type)|\(b["id"] as? String ?? "")".hashValue, 0)
+    }
+}
+
+/// Hand-rolled parser for the fixed-format UTC timestamp both Claude Code and
+/// Codex write (`yyyy-MM-ddTHH:mm:ss.SSSZ`, 24 bytes). `ISO8601DateFormatter` was
+/// 36% of the replay's watcher-thread time; this is a few dozen integer ops.
+/// Anything that is not exactly that shape returns nil and the caller falls back
+/// to `ISO8601DateFormatter`, so unusual-but-valid forms still parse.
+enum FastTimestamp {
+    static func parse(_ string: String) -> Date? {
+        var s = string
+        return s.withUTF8 { parse(utf8: $0) }
+    }
+
+    static func parse(utf8 p: UnsafeBufferPointer<UInt8>) -> Date? {
+        guard p.count == 24, p[4] == 0x2D, p[7] == 0x2D, p[10] == 0x54, p[13] == 0x3A,
+              p[16] == 0x3A, p[19] == 0x2E, p[23] == 0x5A else { return nil }
+        @inline(__always) func d(_ i: Int) -> Int {
+            let v = Int(p[i]) &- 0x30
+            return (v >= 0 && v <= 9) ? v : -1_000_000
+        }
+        let y = d(0) * 1000 + d(1) * 100 + d(2) * 10 + d(3)
+        let mo = d(5) * 10 + d(6), da = d(8) * 10 + d(9)
+        let h = d(11) * 10 + d(12), mi = d(14) * 10 + d(15), se = d(17) * 10 + d(18)
+        let ms = d(20) * 100 + d(21) * 10 + d(22)
+        guard y >= 1970, mo >= 1, mo <= 12, da >= 1, h >= 0, h < 24, mi >= 0, mi < 60,
+              se >= 0, se < 60, ms >= 0 else { return nil }
+        let leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0
+        let dim: Int
+        switch mo {
+        case 2: dim = leap ? 29 : 28
+        case 4, 6, 9, 11: dim = 30
+        default: dim = 31
+        }
+        guard da <= dim else { return nil }
+        // Days from civil (Howard Hinnant's algorithm).
+        let yy = mo <= 2 ? y - 1 : y
+        let era = yy / 400
+        let yoe = yy - era * 400
+        let doy = (153 * (mo + (mo > 2 ? -3 : 9)) + 2) / 5 + da - 1
+        let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy
+        let days = era * 146_097 + doe - 719_468
+        let secs = days * 86_400 + h * 3_600 + mi * 60 + se
+        return Date(timeIntervalSince1970: Double(secs) + Double(ms) / 1000)
     }
 }

@@ -22,8 +22,11 @@ final class TranscriptWatcher {
 
     func start() {
         queue.async {
+            self.bulkReplay = true
             self.bootstrap()
             self.scan()
+            self.flushReplayBatch()
+            self.bulkReplay = false
             if self.backfilling {
                 for event in self.backfillBestByKey.values {
                     self.backfillBatch[UsageStore.dayKey(event.timestamp), default: DayAgg()].add(event)
@@ -79,7 +82,7 @@ final class TranscriptWatcher {
             includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey],
             options: [.skipsHiddenFiles]) else { return [] }
         var out: [URL] = []
-        for case let u as URL in en where u.pathExtension == "jsonl" { out.append(u) }
+        for case let u as URL in en where u.pathExtension == "jsonl" && !ClaudeProjectRoots.isIgnoredTranscript(u) { out.append(u) }
         return out
     }
 
@@ -163,30 +166,53 @@ final class TranscriptWatcher {
         else if size < off { offsets[url.path] = size }
     }
 
-    private func readNew(_ url: URL, from offset: UInt64) {
-        guard let fh = try? FileHandle(forReadingFrom: url) else { return }
-        defer { try? fh.close() }
-        guard (try? fh.seek(toOffset: offset)) != nil,
-              let data = try? fh.readToEnd(), !data.isEmpty else { return }
-
-        var consumed = 0
-        var start = data.startIndex
-        while let nl = data[start...].firstIndex(of: 0x0A) {
-            let line = data[start..<nl]
-            consumed = nl - data.startIndex + 1
-            start = nl + 1
-            if !line.isEmpty { parse(Data(line), file: url) }
+    /// Per-file values computed once per read, not once per line.
+    private final class FileContext {
+        let url: URL
+        let path: String
+        let fileSession: String
+        private var mtimeResolved = false
+        private var mtimeValue: Date?
+        init(_ url: URL) {
+            self.url = url
+            path = url.path
+            fileSession = url.deletingPathExtension().lastPathComponent
         }
-        // Only advance past complete lines; a partially written tail is re-read next tick.
-        offsets[url.path] = offset + UInt64(consumed)
+        /// Consulted lazily, only while a file has produced no timestamp yet.
+        func mtime() -> Date? {
+            if !mtimeResolved {
+                mtimeResolved = true
+                mtimeValue = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+            }
+            return mtimeValue
+        }
+    }
+
+    /// Chunked (2 MB) read from `offset`: each complete line is handed to `parse`
+    /// straight out of the read buffer; a partial trailing line is carried across
+    /// chunks and, at EOF, re-read next tick (the offset only advances past
+    /// complete lines). One autorelease pool per file keeps Foundation temporaries
+    /// from piling up across the whole replay.
+    private func readNew(_ url: URL, from offset: UInt64) {
+        autoreleasepool {
+            let ctx = FileContext(url)
+            let end = TranscriptIO.forEachLine(path: ctx.path, from: offset) { raw, _ in
+                parse(raw, ctx)
+            }
+            offsets[ctx.path] = end
+        }
     }
 
     // Cheap byte-level pre-filter so bulk replay doesn't JSON-decode every line;
     // assistant lines always contain this, anything else that does just gets decoded.
-    private static let assistantMarker = Data("\"assistant\"".utf8)
-    private static let aiTitleMarker = Data("\"ai-title\"".utf8)
-    private static let summaryMarker = Data("\"type\":\"summary\"".utf8)
-    private static let userMarker = Data("\"type\":\"user\"".utf8)
+    // (SIMD marker scan over the raw read buffer — no Data wrapper is built unless a marker hits.)
+    private static let assistantMarker = TranscriptIO.Needle("\"assistant\"")
+    private static let aiTitleMarker = TranscriptIO.Needle("\"ai-title\"")
+    private static let summaryMarker = TranscriptIO.Needle("\"type\":\"summary\"")
+    private static let userMarker = TranscriptIO.Needle("\"type\":\"user\"")
+    /// ai-title / summary records are a few hundred bytes; never scan a multi-MB
+    /// tool-result line for them.
+    private static let maxTitleLine = 16 * 1024
 
     private var fallbackNamed = Set<String>()   // sessions with a first-message name sent
 
@@ -195,9 +221,10 @@ final class TranscriptWatcher {
     /// generates and shows in /resume. Older Claude Code wrote `"summary"`
     /// lines instead; both are honored. Sessions with neither fall back to the
     /// first real user message.
-    private func handleMeta(_ data: Data, file: URL) {
-        let fileSession = file.deletingPathExtension().lastPathComponent
-        if data.range(of: Self.aiTitleMarker) != nil {
+    private func handleMeta(_ raw: UnsafeRawBufferPointer, _ ctx: FileContext) {
+        let fileSession = ctx.fileSession
+        if raw.count <= Self.maxTitleLine && TranscriptIO.contains(raw, Self.aiTitleMarker) {
+            let data = TranscriptIO.data(raw)
             if let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
                obj["type"] as? String == "ai-title",
                let title = (obj["aiTitle"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -206,7 +233,8 @@ final class TranscriptWatcher {
             }
             return
         }
-        if data.range(of: Self.summaryMarker) != nil {
+        if raw.count <= Self.maxTitleLine && TranscriptIO.contains(raw, Self.summaryMarker) {
+            let data = TranscriptIO.data(raw)
             if let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
                obj["type"] as? String == "summary",
                let s = (obj["summary"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -215,7 +243,9 @@ final class TranscriptWatcher {
             }
             return
         }
-        guard !fallbackNamed.contains(fileSession), data.range(of: Self.userMarker) != nil else { return }
+        guard !fallbackNamed.contains(fileSession),
+              TranscriptIO.contains(raw, Self.userMarker) else { return }
+        let data = TranscriptIO.data(raw)
         guard let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
               obj["type"] as? String == "user",
               obj["isMeta"] as? Bool != true,
@@ -237,16 +267,30 @@ final class TranscriptWatcher {
         store.setSessionName(obj["sessionId"] as? String ?? fileSession, t, fallback: true)
     }
 
-    private func parse(_ data: Data, file: URL) {
-        guard data.range(of: Self.assistantMarker) != nil else {
-            handleMeta(data, file: file)
+    private func parse(_ raw: UnsafeRawBufferPointer, _ ctx: FileContext) {
+        guard TranscriptIO.contains(raw, Self.assistantMarker) else {
+            handleMeta(raw, ctx)
             return
         }
-        let path = file.path
         let observations = parser.parse(
-            data, fileKey: path, fileSession: file.deletingPathExtension().lastPathComponent,
-            mtime: { (try? file.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate })
+            TranscriptIO.data(raw), fileKey: ctx.path, fileSession: ctx.fileSession,
+            mtime: { ctx.mtime() })
         for obs in observations { route(obs.event, key: obs.dedupKey) }
+    }
+
+    /// Launch replay hands events to the main actor in batches (one main hop, one
+    /// sort/merge, one publish per batch) instead of one `main.async` per line.
+    /// Live tailing after the replay stays per-line.
+    private static let replayBatchSize = 500
+    private var bulkReplay = false
+    private var replayBatch: [(event: UsageEvent, dedupKey: String)] = []
+
+    private func flushReplayBatch() {
+        guard !replayBatch.isEmpty else { return }
+        let batch = replayBatch
+        replayBatch = []
+        replayBatch.reserveCapacity(Self.replayBatchSize)
+        store.ingest(batch: batch)
     }
 
     private func route(_ event: UsageEvent, key: String) {
@@ -254,7 +298,12 @@ final class TranscriptWatcher {
         // Streaming writes can repeat a message across lines. Keep the strongest
         // occurrence so a partial/zero rewrite cannot suppress finalized usage.
         if ts >= cutoff {
-            store.addTranscriptEvent(event, dedupKey: key)
+            if bulkReplay {
+                replayBatch.append((event, key))
+                if replayBatch.count >= Self.replayBatchSize { flushReplayBatch() }
+            } else {
+                store.addTranscriptEvent(event, dedupKey: key)
+            }
         } else if backfilling, ts >= backfillFrom {
             if let existing = backfillBestByKey[key] {
                 backfillBestByKey[key] = EventReconciler.preferred(existing, event)

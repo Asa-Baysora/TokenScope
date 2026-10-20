@@ -52,6 +52,7 @@ swiftc Sources/TokenScope/Models.swift \
 swiftc Sources/TokenScope/Models.swift \
   Sources/TokenScope/EventReconciler.swift \
   Sources/TokenScope/ClaudeTranscriptParser.swift \
+  Sources/TokenScope/TranscriptIO.swift \
   tools/verify-transcript.swift \
   -o "$cache_root/transcript-checks"
 "$cache_root/transcript-checks"

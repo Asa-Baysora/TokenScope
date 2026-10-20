@@ -34,9 +34,9 @@ final class CodexTranscriptWatcher {
 
     private static let fullScanEveryTicks = 10
     private static let hotWindow: TimeInterval = 180
-    private static let tokenCountMarker = Data("\"token_count\"".utf8)
-    private static let sessionMetaMarker = Data("\"session_meta\"".utf8)
-    private static let turnContextMarker = Data("\"turn_context\"".utf8)
+    private static let tokenCountMarker = TranscriptIO.Needle("\"token_count\"")
+    private static let sessionMetaMarker = TranscriptIO.Needle("\"session_meta\"")
+    private static let turnContextMarker = TranscriptIO.Needle("\"turn_context\"")
     private static let isoFrac: ISO8601DateFormatter = {
         let f = ISO8601DateFormatter(); f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]; return f
     }()
@@ -75,8 +75,10 @@ final class CodexTranscriptWatcher {
                 self.sessionMetadata = [:]
                 self.latestModel = [:]
                 self.tick = 0
-                self.bootstrap()
-                self.fullScan()
+                self.bulk {
+                    self.bootstrap()
+                    self.fullScan()
+                }
                 self.finishBackfillIfNeeded()
                 FileLog.log("Codex limits refreshed from local sessions")
             }
@@ -88,8 +90,10 @@ final class CodexTranscriptWatcher {
     private func startScanning() {
         guard timer == nil else { return }
         queue.async { [weak self] in
-            self?.bootstrap()
-            self?.scan()
+            self?.bulk {
+                self?.bootstrap()
+                self?.scan()
+            }
             self?.finishBackfillIfNeeded()
         }
         let t = DispatchSource.makeTimerSource(queue: queue)
@@ -112,8 +116,10 @@ final class CodexTranscriptWatcher {
         sessionMetadata = [:]
         latestModel = [:]
         tick = 0
-        bootstrap()
-        scan()
+        bulk {
+            bootstrap()
+            scan()
+        }
         finishBackfillIfNeeded()
         FileLog.log("Codex local quota observation resumed; session token tracking active")
     }
@@ -193,24 +199,54 @@ final class CodexTranscriptWatcher {
         else if size < offset { offsets[url.path] = size }
     }
 
-    private func readNew(_ url: URL, from offset: UInt64) {
-        guard let handle = try? FileHandle(forReadingFrom: url) else { return }
-        defer { try? handle.close() }
-        guard (try? handle.seek(toOffset: offset)) != nil,
-              let data = try? handle.readToEnd(), !data.isEmpty else { return }
-
-        var consumed = 0
-        var start = data.startIndex
-        while let newline = data[start...].firstIndex(of: 0x0A) {
-            let line = data[start..<newline]
-            let lineOffset = offset + UInt64(start - data.startIndex)
-            consumed = newline - data.startIndex + 1
-            start = newline + 1
-            if !line.isEmpty { parse(Data(line), file: url, offset: lineOffset) }
+    /// Per-file values computed once per read, not once per line.
+    private final class FileContext {
+        let path: String
+        let fallbackSession: String   // file-name stem (used when session_meta was never seen)
+        let sessionKey: String        // path-independent dedup stem
+        let liveCutoff: Date          // one store.eventsCutoff per read, not per line
+        init(_ url: URL, liveCutoff: Date) {
+            path = url.path
+            fallbackSession = url.deletingPathExtension().lastPathComponent
+            sessionKey = CodexHistory.sessionKey(fileName: url.lastPathComponent)
+            self.liveCutoff = liveCutoff
         }
-        // Like Claude Code, Codex can leave a partial JSON record at EOF while
-        // streaming a turn. Leave it to be retried on the next poll.
-        offsets[url.path] = offset + UInt64(consumed)
+    }
+
+    /// Chunked (2 MB) read; lines are parsed straight out of the read buffer, a
+    /// partial trailing record (Codex can leave one at EOF mid-turn) is carried
+    /// across chunks and, at EOF, re-read next poll (offset only advances past
+    /// complete lines). One autorelease pool per file.
+    private func readNew(_ url: URL, from offset: UInt64) {
+        autoreleasepool {
+            let ctx = FileContext(url, liveCutoff: store.eventsCutoff)
+            let end = TranscriptIO.forEachLine(path: ctx.path, from: offset) { raw, _ in
+                parse(raw, ctx)
+            }
+            offsets[ctx.path] = end
+        }
+    }
+
+    // Launch replay (and limits-refresh replays) batch their store hand-off; live
+    // tailing stays per-line. See UsageStore.ingest(batch:).
+    private static let replayBatchSize = 500
+    private var bulkReplay = false
+    private var replayBatch: [(event: UsageEvent, dedupKey: String)] = []
+
+    private func flushReplayBatch() {
+        guard !replayBatch.isEmpty else { return }
+        let batch = replayBatch
+        replayBatch = []
+        replayBatch.reserveCapacity(Self.replayBatchSize)
+        store.ingest(batch: batch)
+    }
+
+    /// Runs `work` (a bootstrap + scan pass) with batched store hand-off, flushing at the end.
+    private func bulk(_ work: () -> Void) {
+        bulkReplay = true
+        work()
+        flushReplayBatch()
+        bulkReplay = false
     }
 
     private struct Line: Decodable {
@@ -247,12 +283,15 @@ final class CodexTranscriptWatcher {
         }
     }
 
-    private func parse(_ data: Data, file: URL, offset: UInt64) {
-        let hasTokenCount = data.range(of: Self.tokenCountMarker) != nil
-        let hasSessionMeta = data.range(of: Self.sessionMetaMarker) != nil
-        let hasTurnContext = data.range(of: Self.turnContextMarker) != nil
+    private let decoder = JSONDecoder()
+
+    private func parse(_ raw: UnsafeRawBufferPointer, _ ctx: FileContext) {
+        let hasTokenCount = TranscriptIO.contains(raw, Self.tokenCountMarker)
+        let hasSessionMeta = TranscriptIO.contains(raw, Self.sessionMetaMarker)
+        let hasTurnContext = TranscriptIO.contains(raw, Self.turnContextMarker)
         guard hasTokenCount || hasSessionMeta || hasTurnContext,
-              let line = try? JSONDecoder().decode(Line.self, from: data) else { return }
+              let line = try? decoder.decode(Line.self, from: TranscriptIO.data(raw)) else { return }
+        let file = ctx
         if hasSessionMeta, line.type == "session_meta", let payload = line.payload,
            let id = payload.id {
             sessionMetadata[file.path] = (
@@ -268,8 +307,8 @@ final class CodexTranscriptWatcher {
             return
         }
         guard line.type == "event_msg", line.payload?.type == "token_count" else { return }
-        let timestamp = line.timestamp.flatMap { Self.isoFrac.date(from: $0) ?? Self.iso.date(from: $0) } ?? Date()
-        let liveCutoff = store.eventsCutoff
+        let timestamp = line.timestamp.flatMap { FastTimestamp.parse($0) ?? Self.isoFrac.date(from: $0) ?? Self.iso.date(from: $0) } ?? Date()
+        let liveCutoff = ctx.liveCutoff
         if let limits = line.payload?.rate_limits {
             self.limits.observe(
                 primary: window(limits.primary), secondary: window(limits.secondary), at: timestamp)
@@ -293,7 +332,7 @@ final class CodexTranscriptWatcher {
             provider: .codex,
             source: .codexTranscript,
             model: latestModel[file.path] ?? "Codex",
-            sessionId: sessionMetadata[file.path]?.id ?? file.deletingPathExtension().lastPathComponent,
+            sessionId: sessionMetadata[file.path]?.id ?? file.fallbackSession,
             projectName: sessionMetadata[file.path]?.project,
             inputTokens: input,
             outputTokens: output,
@@ -302,13 +341,18 @@ final class CodexTranscriptWatcher {
             reasoningTokens: usage.reasoning_output_tokens ?? 0)
         // File-name stem, not session_meta: tailing from EOF never sees the meta
         // line, and a replay must produce the same key as a tail.
-        let sid = CodexHistory.sessionKey(fileName: file.lastPathComponent)
+        let sid = file.sessionKey
         let key = CodexHistory.dedupKey(
             sessionId: sid, timestamp: line.timestamp ?? "",
             totalInput: signature?.input ?? usage.input_tokens ?? 0,
             totalOutput: signature?.output ?? output)
         if timestamp >= liveCutoff {
-            store.addTranscriptEvent(event, dedupKey: key)
+            if bulkReplay {
+                replayBatch.append((event, key))
+                if replayBatch.count >= Self.replayBatchSize { flushReplayBatch() }
+            } else {
+                store.addTranscriptEvent(event, dedupKey: key)
+            }
         } else if backfilling, timestamp >= backfillFrom, backfillSeen.insert(key).inserted {
             backfillBatch[UsageStore.dayKey(timestamp), default: DayAgg()].add(event)
         }

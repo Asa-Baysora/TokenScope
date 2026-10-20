@@ -154,6 +154,71 @@ final class UsageStore: ObservableObject {
         ingest(e, dedupKey: dedupKey, persist: true)
     }
 
+    /// Bulk transcript ingest for launch replay (non-persisted, replayable sources
+    /// only). Same dedup semantics as the per-event path: keys already in the store
+    /// go through `EventReconciler.preferred(existing, incoming)` (replace in place,
+    /// keep the `shadowed` flag, ties keep the existing record), and repeats inside
+    /// the batch fold the same way. New events are then merged in chronological
+    /// order with ONE sort/merge and ONE `events` publish per batch, and the window
+    /// is trimmed once. The per-event live double-count matcher
+    /// (`reconcileDuplicates`) is deliberately not run here: replay always ends with
+    /// `replayFinished`, whose full pass shadows every proxy/desktop event that has
+    /// a transcript twin. Live (post-replay) arrivals keep using `addTranscriptEvent`.
+    func ingest(batch: [(event: UsageEvent, dedupKey: String)]) {
+        guard !batch.isEmpty else { return }
+        DispatchQueue.main.async {
+            // 1. Fold repeats within the batch (first-seen order preserved).
+            var slot: [String: Int] = [:]
+            var unique: [(event: UsageEvent, dedupKey: String)] = []
+            unique.reserveCapacity(batch.count)
+            for item in batch {
+                if let i = slot[item.dedupKey] {
+                    unique[i].event = EventReconciler.preferred(unique[i].event, item.event)
+                } else {
+                    slot[item.dedupKey] = unique.count
+                    unique.append(item)
+                }
+            }
+            // 2. Keys already in the store: in-place replace when incoming is stronger.
+            var fresh: [UsageEvent] = []
+            fresh.reserveCapacity(unique.count)
+            var indexByID: [UUID: Int]?
+            for item in unique {
+                guard let existingID = self.eventIDByDedupKey[item.dedupKey] else {
+                    fresh.append(item.event)
+                    self.eventIDByDedupKey[item.dedupKey] = item.event.id
+                    continue
+                }
+                if indexByID == nil {
+                    var m: [UUID: Int] = [:]
+                    m.reserveCapacity(self.events.count)
+                    for (i, e) in self.events.enumerated() { m[e.id] = i }
+                    indexByID = m
+                }
+                guard let index = indexByID?[existingID] else {
+                    // Key map points at an event that is gone (folded); treat as new.
+                    fresh.append(item.event)
+                    self.eventIDByDedupKey[item.dedupKey] = item.event.id
+                    continue
+                }
+                let existing = self.events[index]
+                guard EventReconciler.preferred(existing, item.event).id != existing.id else { continue }
+                var event = item.event
+                event.shadowed = existing.shadowed
+                self.events[index] = event
+                self.eventIDByDedupKey[item.dedupKey] = event.id
+            }
+            // 3. One chronological merge of the new events.
+            self.mergeChronologically(fresh)
+            self.trim()
+        }
+    }
+
+    private func mergeChronologically(_ incoming: [UsageEvent]) {
+        guard !incoming.isEmpty else { return }
+        events = EventMerge.merge(events, incoming)
+    }
+
     private func ingest(_ incoming: UsageEvent, dedupKey: String, persist: Bool) {
         DispatchQueue.main.async {
             var event = incoming
