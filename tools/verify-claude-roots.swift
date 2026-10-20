@@ -98,6 +98,39 @@ struct RootChecks {
                && !ClaudeProjectRoots.isIgnoredTranscript(URL(fileURLWithPath: "/x/abc.jsonl")), "audit filter")
         try? fm.removeItem(at: cw)
 
+        // Cowork transcripts live under hidden `.claude/` directories: the enumerator must
+        // descend into those (only for the Cowork kind), keep ignoring hidden files,
+        // audit.jsonl, node_modules and other hidden directories.
+        let tree = tmp.appendingPathComponent("tree")
+        func touch(_ rel: String) throws {
+            let u = tree.appendingPathComponent(rel)
+            try fm.createDirectory(at: u.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try Data("{}\n".utf8).write(to: u)
+        }
+        let sess = "a/b/local_1"
+        try touch("\(sess)/.claude/projects/-p/s1.jsonl")
+        try touch("\(sess)/.claude/projects/-p/s1/subagents/agent-1.jsonl")
+        try touch("\(sess)/.claude/projects/-p/.hidden.jsonl")
+        try touch("\(sess)/audit.jsonl")
+        try touch("\(sess)/.claude/audit.jsonl")
+        try touch("\(sess)/.git/objects/x.jsonl")
+        try touch("\(sess)/outputs/node_modules/pkg/x.jsonl")
+        try touch("\(sess)/outputs/ok.jsonl")
+        try touch("a/b/local_2/.claude/projects/-q/s2.jsonl")
+        let treeRoot = tree.resolvingSymlinksInPath().path
+        let cowork = ClaudeProjectRoots.enumerateTranscripts(root: tree, kind: .cowork)
+            .map { $0.resolvingSymlinksInPath().path.replacingOccurrences(of: treeRoot + "/", with: "") }.sorted()
+        expect(cowork == ["\(sess)/.claude/projects/-p/s1.jsonl",
+                          "\(sess)/.claude/projects/-p/s1/subagents/agent-1.jsonl",
+                          "\(sess)/outputs/ok.jsonl",
+                          "a/b/local_2/.claude/projects/-q/s2.jsonl"],
+               "cowork root yields .claude transcripts, skips hidden files/dirs, audit.jsonl, node_modules: \(cowork)")
+        let primary = ClaudeProjectRoots.enumerateTranscripts(root: tree, kind: .primary)
+            .map { $0.resolvingSymlinksInPath().path.replacingOccurrences(of: treeRoot + "/", with: "") }.sorted()
+        expect(primary == ["\(sess)/outputs/ok.jsonl"], "primary/extra roots keep skipping every hidden directory: \(primary)")
+        expect(ClaudeProjectRoots.enumerateTranscripts(root: tree.appendingPathComponent("missing"), kind: .cowork).isEmpty,
+               "missing root enumerates to nothing")
+
         // tolerant parsing
         expect(ClaudeProjectRoots.entries(from: " /a \n") == ["/a"], "bare string, trimmed")
         expect(ClaudeProjectRoots.entries(from: ["/a", 3, "", " /b "] as [Any]) == ["/a", "/b"], "array, non-strings dropped")

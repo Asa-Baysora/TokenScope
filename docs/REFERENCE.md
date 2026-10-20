@@ -5,7 +5,7 @@
 > *without reading the Swift source*. Where a fact is load-bearing, the file and the
 > exact value are named so you can jump to it.
 >
-> **Reflects:** v0.1.7 (`CFBundleVersion` 7), 2026-10-10.
+> **Reflects:** v0.1.8 (`CFBundleVersion` 8), 2026-10-19.
 > When you change behavior, update this file in the same commit.
 >
 > **Companion docs:** `CLAUDE.md` is the always-loaded working checklist for coding
@@ -187,8 +187,8 @@ Accumulator: `input, output, cacheRead, cacheCreate, reasoning, calls`; `add(_ e
 this is the green dot in the Sessions list).
 
 ### `StatsPeriod`
-`enum { today, week, month }`. `label` → `"Today"`, `"7 Days"`, `"30 Days"`;
-`days` → `1`, `7`, `30`.
+`enum { today, week, month }`. `label` → `"Today"`, `"7 Days"`, `"28 Days"`;
+`days` → `1`, `7`, `28` (the live events window is 28 whole days; a 30+ day view needs the frozen history and is a follow-up)
 
 ### `DayStat` (in-memory chart/heatmap bucket)
 `day: Date` + `providers: [UsageOrigin: Int]` (accessors `claude, codex, ollama,
@@ -226,6 +226,16 @@ how it feeds the store → privacy → limitations.** Source file named in the h
 
 ### 6.1 Claude Code transcripts — `TranscriptWatcher.swift`
 
+- **Cowork root:** transcripts live under
+  `local-agent-mode-sessions/<a>/<b>/local_<id>/.claude/projects/...`, so
+  `ClaudeProjectRoots.enumerateTranscripts` descends into hidden `.claude` directories
+  for the Cowork kind only (hidden files, other hidden dirs, `node_modules` and
+  `audit.jsonl` stay skipped; primary/extra roots skip every hidden directory as
+  before). Real tree: 139 non-audit transcripts. Census of duplicate message ids there:
+  the only repeats are 201 keys that appear in two session files of the same `local_`
+  dir (resumed sessions, same `id:requestId`, so the normal dedup collapses them);
+  `subagents/` files share no keys with anything, so no further file class needs
+  ignoring beyond `audit.jsonl`.
 - **Reads:** `~/.claude/projects/<project>/<session>.jsonl` plus any
   built-in Cowork root + `ExtraClaudeProjectDirs` roots (`ClaudeProjectRoots.swift`; for `CLAUDE_CONFIG_DIR`
   sessions) via one enumeration loop, re-resolved on each full walk. Every API response Claude
@@ -278,7 +288,9 @@ how it feeds the store → privacy → limitations.** Source file named in the h
   although the content holds thinking + text + tool input. Input/cache fields are
   correct. Claude Code writes one content block per line, so the parser accumulates
   content chars (text + thinking + compact-JSON tool input, de-duplicated by block)
-  per dedup key and reports `max(observed, ceil(chars / 4))` with
+  per dedup key (measured in UTF-8 bytes for text, thinking and tool input alike) and
+  reports `min(max(observed, ceil(bytes / 4)), 128_000)` (`maxEstimatedOutput`; exact
+  lines are never capped) with
   `tokenAccuracy = .estimated` (`ClaudeTranscriptParser.charsPerToken`, measured ≈4
   chars/token on finalized messages). `EventReconciler` ranks `.exact` > `.estimated`
   before token sum, so a later finalized line replaces the estimate and an estimate
@@ -568,9 +580,19 @@ provider-owned `loadedModels`, `runtimeHealth`, `history: [String: DayAgg]` (key
 - `eventsCutoff` = `startOfDay(now) − 28 days` — **aligned to a day boundary** so a
   day is entirely live or entirely frozen. `trim()`, `fold()`, backfill, and time-based
   reconciliation all depend on this; **never** reintroduce a rolling timestamp cutoff.
-- Hard cap: if `events.count > 60_000`, the oldest overflow is folded out too. The
-  overflow fold advances **neither** watermark (it names a mid-window time) and removes
-  the folded events' dedup keys so a later line with the same key is not re-appended.
+- Hard cap: if `events.count > 150_000` (`HistoryFold.overflowCap`), the oldest WHOLE
+  calendar day(s) are folded out (every event of the day, never a slice; the newest
+  day is never folded, so one over-cap day just stays live). The overflow fold advances
+  the Claude watermark to the end of the last folded day (Codex too, only when a Codex
+  event was folded — its watermark doubles as "never backfilled") and drops the folded
+  events' dedup keys. Dropping the keys means a later line with the same key **would be
+  re-appended** (the reverse of "not re-appended"); that is why the watermark is
+  authoritative: both ingest paths (`addTranscriptEvent`/`ingest(batch:)`, via
+  `UsageStore.isFolded`) drop any transcript event whose timestamp is below its
+  provider's watermark, and the watchers route through `HistoryFold.route` (live /
+  backfill / drop). With a watermark above `eventsCutoff` events in
+  `[cutoff, watermark)` are therefore NOT ingested live, and `backfilling` is false.
+  Journal records in that range are dropped at load (already folded).
 - **Shrink 31 → 28 on upgrade.** The Claude watermark sits at the old (31-day) cutoff, so
   the transcript backfill range `(watermark, new cutoff)` now covers the 3 days that left
   the live window; they are aggregated into history once and the watermark advances.
@@ -584,9 +606,21 @@ provider-owned `loadedModels`, `runtimeHealth`, `history: [String: DayAgg]` (key
   runtime) the fold **merges by max per field** instead of summing, and logs it.
 - **Local journal aging.** At load, journaled Ollama/Desktop/LM Studio records older than
   the cutoff (aged out while the app was closed) are folded into history instead of
-  dropped, then the journal is rewritten with live records only. History is loaded first
-  and saved before the rewrite (same serial queue). Local providers have no watermark;
-  max-merge makes a repeated fold harmless if the rewrite is ever lost.
+  dropped. LM Studio records fold at load. **Proxy / Ollama Desktop records are held**
+  (`pendingAged`) until the transcript backfill delivers its Claude-Code-via-Ollama
+  twins (`mergeHistorical(_:ollamaTwins:)`, or `replayFinished` when no backfill ran);
+  they are then shadowed against those twins (±2 tokens / 120 s) and against each other
+  (`desktopAndProxyOverlap`), the survivors fold (BEFORE the backfill sums its own
+  buckets — the fold max-merges, the backfill adds), and only then is the journal
+  rewritten with live records (`compactJournal`; the journal is not compacted past held
+  records, so quitting early loses nothing). Folding them at load was a double count
+  (true 150 became 300). History is loaded first and saved before the rewrite (same
+  serial queue). Local providers have no watermark; max-merge makes a repeated fold
+  harmless if the rewrite is ever lost.
+- **Shadow flags are persisted.** Journal records are written unshadowed; when
+  reconcile (live, `replayFinished`, or the aged pass) shadows a journaled event, a
+  `{"schema":2,"shadowedKey":…}` tombstone line is appended and the loader applies it by
+  key (compaction folds it into the rewritten record). Older builds ignore these lines.
 - `history` persists to `daily-history.json` as
   `{completeThrough, codexCompleteThrough, days:{…}}`. This outlives Claude Code's own
   transcript cleanup — it is what lets the 6-month heatmap accumulate.
@@ -595,9 +629,10 @@ provider-owned `loadedModels`, `runtimeHealth`, `history: [String: DayAgg]` (key
   `mergeCodexHistorical`. Deleting `daily-history.json` triggers a fresh one-time
   backfill on next launch.
 - **Watermarks are per provider.** `fold()` advances `historyCompleteThrough` and, when
-  Codex events folded, `codexHistoryCompleteThrough` (clamped to `eventsCutoff`). Missing
-  the Codex advance re-reads folded days next launch and doubles them. The watcher reads
-  the watermark via `store.codexWatermark()` (main-queue FIFO with the merge write) so a
+  Codex events folded, `codexHistoryCompleteThrough` (clamped to `eventsCutoff` for
+  age-out, to the end of the folded day for an overflow fold). Missing
+  the Codex advance re-reads folded days next launch and doubles them. Both watchers read
+  their watermark via `store.claudeWatermark()` / `store.codexWatermark()` (main-queue FIFO with the merge write) so a
   replay cannot backfill twice. Logic lives in `CodexHistory.swift`
   (checks: `tools/verify-codex.swift`).
 - **History schema.** `daily-history.json` carries `schema` (now 2). Loading a file
@@ -613,7 +648,9 @@ Exactly one copy is counted:
   tokens**; the proxy copy is marked `shadowed`.
 - **Startup:** `replayFinished` sorts events, indexes transcript Ollama events by
   output count, and shadows any persisted proxy event matching within **±120 s** and
-  **±2 tokens** (the wider window covers bulk replay ordering).
+  **±2 tokens** (the wider window covers bulk replay ordering). The same pure rule
+  (`EventReconciler.TranscriptTwinIndex` / `shadowProxyTwins` / `shadowDesktopOverlaps`)
+  is applied to aged journal records against the backfilled twins (§7.3).
 - **Accuracy rule (both paths):** only the **transcript** side of a pair must be
   `tokenAccuracy == .exact` (it always is, by construction). The **proxy** side may be
   `.estimated` (stream ended without a usage record) or `.unknown` (migrated from the
@@ -635,6 +672,14 @@ Exactly one copy is counted:
 
 ### 7.5 Dedup
 - Claude Code transcript events: **`message.id:requestId`**, strongest observation wins.
+  An in-place replacement keeps the **first-seen timestamp** and `shadowed` flag
+  (`EventReconciler.replacement`), so the slot stays in sorted position: `events` MUST
+  stay sorted (`EventRange`, `EventMerge`, trim and the today cache depend on it;
+  `UsageStore.assertSorted()` / `eventsAreSorted`, used by `tools/verify-store.swift`).
+  First-seen = the message's first line (what the ground-truth script uses); chosen over
+  "strongest line's timestamp" because it is stable across streaming rewrites and
+  duplicate files. Real Cowork corpus: 201 resumed-session duplicate keys, copies ≤24 s
+  apart, none across a local day.
 - Codex events: `codex:<rollout stem>:<timestamp>:<total in/out>` (NOT file path/offset).
 - LM Studio: prediction id when present, else
   `"lmstudio:<ts>:<prompt>:<predicted>:<model>"`.
@@ -763,7 +808,7 @@ use a 150 ms ease-in-out animation and become immediate with Reduce Motion.
   available duration or throughput.
 
 ### 9.5 Usage facet
-- Default resting facet. Plain-SwiftUI Today / 7 Days / 30 Days selector.
+- Default resting facet. Plain-SwiftUI Today / 7 Days / 28 Days selector.
 - Large monospaced headline = fresh input/output plus cache when the cache preference
   is enabled. Cost is intentionally absent until a real pricing table exists.
 - Compact provider bars lead to a provider/model detail facet. The set is
@@ -958,6 +1003,8 @@ View-bound; the rest are read directly.
 
 ## 13. Runtime files and directories
 
+- All three files below move under `$TOKENSCOPE_SUPPORT_DIR` when that env var is set
+  (see "Testing" in §14); the log then lives in that directory as `TokenScope.log`.
 - `~/Library/Application Support/TokenScope/usage-events-v2.jsonl` — versioned,
   compacted local-event journal for Ollama proxy, Ollama Desktop metadata, and LM
   Studio observations.
@@ -984,8 +1031,18 @@ swift build -c release            # compile
 # Framework-free domain/protocol/LM Studio regression suites: see CLAUDE.md
 ```
 
+**Testing.** `tools/verify-store.swift` compiles the real `UsageStore` and drives it
+against a scratch directory. `TOKENSCOPE_SUPPORT_DIR=<path>` (absolute or `~/…`) is
+read once at startup (`AppPaths` in `Fmt.swift`) and redirects the journal, the
+daily-history file AND the log (`<path>/TokenScope.log`); unset = the `~/Library`
+locations. Use it for an end-to-end run against a COPY of real data:
+`cp -R ~/Library/Application\ Support/TokenScope /tmp/ts-copy &&
+TOKENSCOPE_SUPPORT_DIR=/tmp/ts-copy .build/release/TokenScope --snapshot /tmp/x.png`.
+The 28-day "month" period is the live window; a longer history-backed view (history
+holds frozen per-day aggregates only) is a follow-up.
+
 `build-app.sh` writes the `Info.plist` (bundle id `com.tokenscope`,
-`CFBundleShortVersionString` = 0.1.7, `CFBundleVersion` = 7, `LSUIElement true`),
+`CFBundleShortVersionString` = 0.1.8, `CFBundleVersion` = 8, `LSUIElement true`),
 generates the icon from `tools/make-icon.swift` if missing, and `codesign --force
 --sign -` (ad-hoc). `Package.swift` is a single executable target, no dependencies.
 
@@ -998,7 +1055,7 @@ the release build and snapshot matrix remain intentionally skipped.
 
 ```sh
 .build/release/TokenScope --snapshot /tmp/menu.png
-SNAPSHOT_PERIOD=month SNAPSHOT_HIDE_WEEKENDS=1 .build/release/TokenScope --snapshot /tmp/menu-30d.png
+SNAPSHOT_PERIOD=month SNAPSHOT_HIDE_WEEKENDS=1 .build/release/TokenScope --snapshot /tmp/menu-28d.png
 ```
 `--snapshot` boots the real services, waits **8 s** for replay, and renders the active
 tab inline at 2× via `ImageRenderer`. Env overrides (pre-seed the matching prefs):

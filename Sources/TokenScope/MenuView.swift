@@ -693,7 +693,7 @@ struct MenuView: View {
 
     private func sparkPeakLabel(_ index: Int) -> String {
         if period == .today { return String(format: "%02d:00", index) }
-        let days = period == .week ? 7 : 30
+        let days = period.days
         let offset = index - (days - 1)
         guard let date = Calendar.current.date(byAdding: .day, value: offset, to: Date()) else { return "" }
         return Self.shortDayFmt.string(from: date)

@@ -266,6 +266,13 @@ struct ModelChecks {
         try expect(underflow.fresh(.claudeCode, includeCache: true) == 0,
                    "DayStat.fresh clamps at zero rather than reporting negative tokens")
 
+        // The "month" period is the live window: 28 whole days, labelled honestly (it was 30 days
+        // over a 28-day window, i.e. two empty bars and an undercount).
+        try expect(StatsPeriod.month.days == 28 && StatsPeriod.month.label == "28 Days"
+                   && StatsPeriod.week.days == 7 && StatsPeriod.today.days == 1
+                   && StatsPeriod.month.rawValue == "month",
+                   "month period is 28 days / '28 Days' and keeps its stored raw value")
+
         print("model checks passed")
     }
 

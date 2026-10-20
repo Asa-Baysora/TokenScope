@@ -48,6 +48,11 @@ struct ClaudeTranscriptParser {
         return f
     }()
 
+    /// Hard ceiling on an ESTIMATED output (the largest real max output is 128k
+    /// tokens): one enormous tool-input block can no longer fabricate millions.
+    /// A finalized (exact) line is never capped — it is the API's own count.
+    static let maxEstimatedOutput = 128_000
+
     static func estimateTokens(chars: Int) -> Int {
         (chars + charsPerToken - 1) / charsPerToken
     }
@@ -56,15 +61,29 @@ struct ClaudeTranscriptParser {
     /// consulted lazily, only when no earlier timestamp exists.
     mutating func parse(_ data: Data, fileKey: String, fileSession: String,
                         mtime: () -> Date?) -> [Observation] {
-        guard let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
-              obj["type"] as? String == "assistant",
-              let msg = obj["message"] as? [String: Any],
-              let usage = msg["usage"] as? [String: Any],
-              let model = msg["model"] as? String, model != "<synthetic>" else { return [] }
+        guard let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return [] }
 
-        var ts: Date
+        // Carry-forward source: ANY decoded line that has a timestamp, recorded
+        // before the early returns below (a synthetic, usage-less or non-assistant
+        // line still tells us where in time the file is). Note the watcher only
+        // hands the parser lines containing "assistant" — plain user/tool lines are
+        // deliberately not JSON-decoded (byte pre-filter rule).
+        var lineTimestamp: Date?
         if let s = obj["timestamp"] as? String,
            let d = FastTimestamp.parse(s) ?? Self.isoFrac.date(from: s) ?? Self.iso.date(from: s) {
+            lineTimestamp = d
+        }
+
+        guard obj["type"] as? String == "assistant",
+              let msg = obj["message"] as? [String: Any],
+              let usage = msg["usage"] as? [String: Any],
+              let model = msg["model"] as? String, model != "<synthetic>" else {
+            if let d = lineTimestamp { lastTimestamp[fileKey] = d }
+            return []
+        }
+
+        var ts: Date
+        if let d = lineTimestamp {
             ts = d
             lastTimestamp[fileKey] = d
         } else if let prev = lastTimestamp[fileKey] {
@@ -99,7 +118,7 @@ struct ClaudeTranscriptParser {
             }
             if acc.count > 50_000 { acc.removeAll(keepingCapacity: true) }  // bound memory
             acc[key] = a
-            output = max(output, Self.estimateTokens(chars: a.chars))
+            output = max(output, min(Self.estimateTokens(chars: a.chars), Self.maxEstimatedOutput))
             accuracy = .estimated
         }
 
@@ -131,15 +150,17 @@ struct ClaudeTranscriptParser {
         return out
     }
 
-    /// (identity hash, character count) of one content block: text, thinking text,
-    /// or JSON-serialized tool input.
+    /// (identity hash, size) of one content block: text, thinking text, or
+    /// JSON-serialized tool input. Size is UTF-8 BYTES for all three, so text and
+    /// tool input are measured the same way (it was scalars for text, bytes for
+    /// input); `charsPerToken` is therefore bytes per token (identical for ASCII).
     private static func measure(_ b: [String: Any]) -> (Int, Int) {
         let type = b["type"] as? String ?? ""
         if let t = b["text"] as? String {
-            return ("\(type)|\(t)".hashValue, t.unicodeScalars.count)
+            return ("\(type)|\(t)".hashValue, t.utf8.count)
         }
         if let t = b["thinking"] as? String {
-            return ("\(type)|\(t)".hashValue, t.unicodeScalars.count)
+            return ("\(type)|\(t)".hashValue, t.utf8.count)
         }
         if let input = b["input"], JSONSerialization.isValidJSONObject(input),
            let d = try? JSONSerialization.data(withJSONObject: input, options: [.withoutEscapingSlashes]) {

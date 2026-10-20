@@ -31,7 +31,12 @@ final class TranscriptWatcher {
                 for event in self.backfillBestByKey.values {
                     self.backfillBatch[UsageStore.dayKey(event.timestamp), default: DayAgg()].add(event)
                 }
-                self.store.mergeHistorical(self.backfillBatch)
+                // Exact Ollama-routed transcript events let the store shadow journaled
+                // proxy records that aged out while closed (see foldPendingAged).
+                let twins = self.backfillBestByKey.values.filter {
+                    $0.provider == .ollama && $0.tokenAccuracy == .exact
+                }
+                self.store.mergeHistorical(self.backfillBatch, ollamaTwins: Array(twins))
                 self.backfillBatch = [:]
                 self.backfillBestByKey = [:]
                 self.backfilling = false
@@ -56,7 +61,8 @@ final class TranscriptWatcher {
     private func bootstrap() {
         cutoff = store.eventsCutoff
         let ancient = Date().addingTimeInterval(-366 * 86400)
-        backfillFrom = max(store.historyCompleteThrough, ancient)
+        // Same main-queue read the Codex side uses: the watermark is written on main.
+        backfillFrom = max(store.claudeWatermark(), ancient)
         backfilling = backfillFrom < cutoff
         var read = 0
         refreshRoots(seed: false)
@@ -76,14 +82,10 @@ final class TranscriptWatcher {
     private var knownRoots: Set<String> = []
     private var rootsSignature = ""
 
+    private var rootKinds: [String: ClaudeProjectRoots.Kind] = [:]
+
     private func enumerate(_ root: URL) -> [URL] {
-        guard let en = FileManager.default.enumerator(
-            at: root,
-            includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey],
-            options: [.skipsHiddenFiles]) else { return [] }
-        var out: [URL] = []
-        for case let u as URL in en where u.pathExtension == "jsonl" && !ClaudeProjectRoots.isIgnoredTranscript(u) { out.append(u) }
-        return out
+        ClaudeProjectRoots.enumerateTranscripts(root: root, kind: rootKinds[root.path] ?? .extra)
     }
 
     /// Re-resolves the roots (one defaults read + a few stats; called at bootstrap
@@ -106,6 +108,7 @@ final class TranscriptWatcher {
             }
         }
         knownRoots = paths
+        rootKinds = r.kinds
         roots = existing
         let sig = existing.map(\.path).joined(separator: "|") + "#" + r.rejected.joined(separator: "|")
         if sig != rootsSignature {
@@ -294,22 +297,27 @@ final class TranscriptWatcher {
     }
 
     private func route(_ event: UsageEvent, key: String) {
-        let ts = event.timestamp
         // Streaming writes can repeat a message across lines. Keep the strongest
         // occurrence so a partial/zero rewrite cannot suppress finalized usage.
-        if ts >= cutoff {
+        // `backfillFrom` is the persisted watermark: events below it are already in
+        // history even when it sits above `cutoff` (an overflow fold advanced it).
+        switch HistoryFold.route(event.timestamp, cutoff: cutoff, backfilling: backfilling,
+                                 backfillFrom: backfillFrom, watermark: backfillFrom) {
+        case .live:
             if bulkReplay {
                 replayBatch.append((event, key))
                 if replayBatch.count >= Self.replayBatchSize { flushReplayBatch() }
             } else {
                 store.addTranscriptEvent(event, dedupKey: key)
             }
-        } else if backfilling, ts >= backfillFrom {
+        case .backfill:
             if let existing = backfillBestByKey[key] {
                 backfillBestByKey[key] = EventReconciler.preferred(existing, event)
             } else {
                 backfillBestByKey[key] = event
             }
+        case .drop:
+            break
         }
     }
 }

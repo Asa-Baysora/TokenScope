@@ -46,6 +46,45 @@ enum ClaudeProjectRoots {
         url.lastPathComponent == "audit.jsonl"
     }
 
+    /// Hidden directories the enumerator may descend into, per root kind. Cowork
+    /// keeps its Claude Code transcripts under
+    /// `local-agent-mode-sessions/<a>/<b>/local_<id>/.claude/projects/...` (the
+    /// agent's `CLAUDE_CONFIG_DIR`), so `.claude` must be walked there. Primary and
+    /// extra roots are already `.../projects`, where hidden directories are noise.
+    static func descendableHiddenDirectories(for kind: Kind) -> Set<String> {
+        kind == .cowork ? [".claude"] : []
+    }
+
+    /// Every `*.jsonl` transcript under `root`: hidden FILES are always skipped,
+    /// hidden directories only unless allowed for `kind`; `audit.jsonl` and other
+    /// ignored classes are excluded. (`FileManager`'s `.skipsHiddenFiles` also skips
+    /// hidden directories, which silently emptied the Cowork root.)
+    static func enumerateTranscripts(root: URL, kind: Kind,
+                                     fileManager fm: FileManager = .default) -> [URL] {
+        guard let en = fm.enumerator(
+            at: root,
+            includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey, .isDirectoryKey],
+            options: []) else { return [] }
+        let allowed = descendableHiddenDirectories(for: kind)
+        var out: [URL] = []
+        for case let u as URL in en {
+            let name = u.lastPathComponent
+            if name == "node_modules" {
+                // Cowork sandboxes install packages next to the transcripts; they
+                // are thousands of files that can never hold one.
+                en.skipDescendants()
+                continue
+            }
+            if name.hasPrefix(".") {
+                let isDir = (try? u.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory ?? false
+                if isDir && !allowed.contains(name) { en.skipDescendants() }
+                continue   // hidden file, or the hidden directory entry itself
+            }
+            if u.pathExtension == "jsonl" && !isIgnoredTranscript(u) { out.append(u) }
+        }
+        return out
+    }
+
     /// Tolerant read of the raw defaults value: an array (non-strings ignored)
     /// or a bare String. Entries are trimmed of whitespace and newlines.
     static func entries(from value: Any?) -> [String] {

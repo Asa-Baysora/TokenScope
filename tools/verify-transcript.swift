@@ -109,6 +109,41 @@ struct TranscriptChecks {
                                model: "qwen3:8b"), fileKey: "f", fileSession: "fs", mtime: mt)
         expect(oll[0].event.provider == .ollama && oll[0].event.tokenAccuracy == .exact, "ollama transcript stays exact")
 
+        // 6. Estimated output is capped at 128k; an exact line is never capped.
+        var cp = ClaudeTranscriptParser()
+        let huge = cp.parse(line(id: "big", ts: t1, block: ["type": "text", "text": String(repeating: "q", count: 4_000_000)]),
+                            fileKey: "c", fileSession: "fs", mtime: mt)
+        expect(huge[0].event.outputTokens == ClaudeTranscriptParser.maxEstimatedOutput
+               && ClaudeTranscriptParser.maxEstimatedOutput == 128_000
+               && huge[0].event.tokenAccuracy == .estimated, "estimate capped at 128_000 (got \(huge[0].event.outputTokens))")
+        let exactBig = cp.parse(line(id: "big2", ts: t1, block: ["type": "text", "text": "x"], stop: "end_turn", out: 200_000),
+                                fileKey: "c", fileSession: "fs", mtime: mt)
+        expect(exactBig[0].event.outputTokens == 200_000, "exact output never capped")
+
+        // 7. Text and tool input are measured in the same unit (UTF-8 bytes).
+        var up = ClaudeTranscriptParser()
+        let cjk = String(repeating: "\u{4E2D}", count: 40)           // 40 scalars = 120 UTF-8 bytes
+        let u1 = up.parse(line(id: "u1", ts: t1, block: ["type": "text", "text": cjk]), fileKey: "u", fileSession: "fs", mtime: mt)
+        expect(u1[0].event.outputTokens == (120 + 3) / 4, "text counted as UTF-8 bytes: \(u1[0].event.outputTokens)")
+        let uIn: [String: Any] = ["k": cjk]
+        let uBytes = try JSONSerialization.data(withJSONObject: uIn, options: [.withoutEscapingSlashes]).count
+        let u2 = up.parse(line(id: "u2", ts: t1, block: ["type": "tool_use", "id": "t", "name": "N", "input": uIn]),
+                          fileKey: "u", fileSession: "fs", mtime: mt)
+        expect(u2[0].event.outputTokens == (uBytes + 3) / 4, "tool input counted as UTF-8 bytes: \(u2[0].event.outputTokens)")
+
+        // 8. Carry-forward timestamp comes from ANY decoded line with a timestamp, including a
+        // usage-less / synthetic / non-assistant line that returns early.
+        var cf = ClaudeTranscriptParser()
+        let synthetic = cf.parse(line(id: "sy", ts: "2026-10-12T20:00:00.000Z", block: ["type": "text", "text": "x"],
+                                      stop: "end_turn", model: "<synthetic>"), fileKey: "cf", fileSession: "fs", mtime: mt)
+        expect(synthetic.isEmpty, "synthetic still skipped")
+        let userLine = json(["type": "user", "timestamp": "2026-10-12T20:05:00.000Z", "message": ["content": "assistant mention"]])
+        _ = cf.parse(userLine, fileKey: "cf", fileSession: "fs", mtime: mt)
+        let noTs = cf.parse(line(id: "nt", ts: nil, block: ["type": "text", "text": "x"], stop: "end_turn"),
+                            fileKey: "cf", fileSession: "fs", mtime: mt)
+        expect(noTs[0].event.timestamp == ISO8601DateFormatter().date(from: "2026-10-12T20:05:00Z"),
+               "missing ts inherits the previous line's timestamp even from a non-usage line")
+
         ioChecks()
         print("transcript checks passed")
     }

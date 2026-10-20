@@ -20,9 +20,30 @@ enum Fmt {
     }()
 }
 
+/// Where TokenScope keeps its own files. `TOKENSCOPE_SUPPORT_DIR` (absolute or
+/// `~`-prefixed path) redirects EVERYTHING the app persists (journal, daily
+/// history) and moves the log next to it, so an end-to-end run can use a copy of
+/// real data without touching `~/Library`. Unset = the normal locations.
+enum AppPaths {
+    static let envKey = "TOKENSCOPE_SUPPORT_DIR"
+
+    static func override(_ environment: [String: String] = ProcessInfo.processInfo.environment) -> URL? {
+        guard let raw = environment[envKey]?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !raw.isEmpty else { return nil }
+        return URL(fileURLWithPath: (raw as NSString).expandingTildeInPath, isDirectory: true)
+    }
+
+    static let supportDir: URL = override()
+        ?? FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/TokenScope")
+
+    static let logURL: URL = override().map { $0.appendingPathComponent("TokenScope.log") }
+        ?? FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Logs/TokenScope.log")
+}
+
 enum FileLog {
-    private static let url = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent("Library/Logs/TokenScope.log")
+    private static let url = AppPaths.logURL
     private static let queue = DispatchQueue(label: "tokenscope.log", qos: .utility)
     private static let stamp: DateFormatter = {
         let f = DateFormatter()
@@ -37,6 +58,8 @@ enum FileLog {
     private static var size = 0
 
     private static func open() {
+        try? FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         LogRotator.rotateIfNeeded(url: url)
         if !FileManager.default.fileExists(atPath: url.path) {
             FileManager.default.createFile(atPath: url.path, contents: nil)

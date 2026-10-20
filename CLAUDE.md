@@ -34,12 +34,13 @@ swiftc Sources/TokenScope/ClaudeProjectRoots.swift tools/verify-claude-roots.swi
 swiftc Sources/TokenScope/Models.swift Sources/TokenScope/CodexHistory.swift tools/verify-codex.swift -o /tmp/tokenscope-codex-checks && /tmp/tokenscope-codex-checks
 swiftc Sources/TokenScope/Models.swift Sources/TokenScope/EventReconciler.swift Sources/TokenScope/ClaudeTranscriptParser.swift tools/verify-transcript.swift -o /tmp/tokenscope-transcript-checks && /tmp/tokenscope-transcript-checks
 swiftc Sources/TokenScope/Models.swift Sources/TokenScope/CodexHistory.swift Sources/TokenScope/HistoryFold.swift tools/verify-window.swift -o /tmp/tokenscope-window-checks && /tmp/tokenscope-window-checks
+swiftc Sources/TokenScope/{Models,Fmt,PollSupport,TranscriptIO,HistoryFold,CodexHistory,EventReconciler,UsageStore,ResponseScanner,HTTPResponseFramer,HTTPRequestScanner,HTTPIdentityEncodingRewriter}.swift tools/verify-store.swift -o /tmp/tokenscope-store-checks && /tmp/tokenscope-store-checks   # real UsageStore on a scratch TOKENSCOPE_SUPPORT_DIR
 swiftc Sources/TokenScope/PollSupport.swift tools/verify-lightness.swift -o /tmp/tokenscope-lightness-checks && /tmp/tokenscope-lightness-checks   # backoff, publish-on-change, today binary search, log rotation
 # read-only corpus sanity: /tmp/tokenscope-transcript-checks --corpus ~/.claude/projects/<project-dir>
 
 # VERIFY UI BEFORE INSTALLING — render the menu with real data:
 .build/release/TokenScope --snapshot /tmp/menu.png
-SNAPSHOT_PERIOD=month SNAPSHOT_HIDE_WEEKENDS=1 .build/release/TokenScope --snapshot /tmp/menu-30d.png
+SNAPSHOT_PERIOD=month SNAPSHOT_HIDE_WEEKENDS=1 .build/release/TokenScope --snapshot /tmp/menu-28d.png
 # SNAPSHOT_PERIOD=today|week|month, SNAPSHOT_HIDE_WEEKENDS=0|1, SNAPSHOT_BAR_STYLE=stacked|grouped, SNAPSHOT_INCLUDE_CACHE=0|1, SNAPSHOT_CHART_MODE=bar|line
 # SNAPSHOT_TAB=usage|now|history|settings, SNAPSHOT_LIMITS=all|three|two|one|none
 
@@ -72,15 +73,21 @@ reason (`MenuView(snapshotInline: true)`).
   A calendar day is either entirely live (in `events`) or entirely frozen (in
   `history`) — `trim()`/`fold()`/backfill all rely on this; don't reintroduce a
   rolling timestamp cutoff. Window/fold/journal logic is pure in `HistoryFold.swift`
-  (checks: `tools/verify-window.swift`). Only the whole-day age-out advances the
-  watermarks; the 60k overflow fold advances neither and drops the folded dedup
-  keys. A fold into an existing day+provider bucket merges by max, not sum.
-  Journaled local events that aged out while closed are folded into history at
-  load, then the journal is compacted.
+  (checks: `tools/verify-window.swift`; the real store: `tools/verify-store.swift`). The
+  whole-day age-out advances the watermarks to the cutoff; the 150k overflow fold folds
+  the oldest WHOLE day and advances them to that day's end. The watermark is
+  authoritative: both ingest paths drop transcript events below it (`isFolded`), and
+  dropped dedup keys WOULD be re-appended without that. A fold into an existing
+  day+provider bucket merges by max, not sum. Journaled local events that aged out while
+  closed are folded at load (LM Studio) or held until the transcript backfill supplies
+  their Ollama twins (proxy/Desktop), then folded, then the journal is compacted.
+  `TOKENSCOPE_SUPPORT_DIR` redirects the support dir and the log (testing).
+  `events` must stay sorted: an in-place dedup replacement keeps the first-seen timestamp.
 - **Double-count prevention.** A Claude Code call routed through the proxy is
   seen twice (proxy + transcript). Live: ±90s output-token match marks the proxy
   copy `shadowed`. Startup: `replayFinished` re-reconciles persisted proxy
-  events. Totals exclude shadowed events; don't count them anywhere else.
+  events; shadow decisions on journaled events are persisted (tombstone lines) so a
+  restart cannot resurrect them. Totals exclude shadowed events; don't count them anywhere else.
 - **Claude transcript accuracy** (`ClaudeTranscriptParser.swift`). ~half of messages
   (those ending in `tool_use`) never get a `stop_reason`, so every line keeps the
   `message_start` output snapshot (1–10 tokens). One content block per line: chars are
@@ -89,7 +96,10 @@ reason (`MenuView(snapshotInline: true)`).
   `EventReconciler`. `usage.iterations[]` entries with type ≠ "message" (advisor
   calls) are a separate model's tokens → extra events `"<key>:iter<i>"`, model
   suffixed " (advisor)". Missing `timestamp` → previous line's in that file, else
-  file mtime, never `Date()`.
+  file mtime, never `Date()` (same rule in the Codex watcher). Carry-forward updates from
+  any decoded line with a timestamp; estimated output is capped at 128k and measured in
+  UTF-8 bytes. Cowork transcripts sit under hidden `.claude/` dirs: the enumerator
+  descends into them for the Cowork root only.
 - **Transcript dedup** is `message.id:requestId`; `EventReconciler` keeps the
   strongest observation so a final rewrite upgrades a partial/zero record and a
   later stale replay cannot downgrade it.

@@ -26,6 +26,7 @@ final class CodexTranscriptWatcher {
     // file (turn_context precedes its token_counts in file order) so each event
     // carries its real model instead of a generic "Codex".
     private var latestModel: [String: String] = [:]
+    private var lastTimestamp: [String: Date] = [:]   // per file, for timestamp carry-forward
     private var tick = 0
     private var backfillFrom = Date.distantPast
     private var backfilling = false
@@ -74,6 +75,7 @@ final class CodexTranscriptWatcher {
                 self.activePaths = []
                 self.sessionMetadata = [:]
                 self.latestModel = [:]
+                self.lastTimestamp = [:]
                 self.tick = 0
                 self.bulk {
                     self.bootstrap()
@@ -115,6 +117,7 @@ final class CodexTranscriptWatcher {
         activePaths = []
         sessionMetadata = [:]
         latestModel = [:]
+        lastTimestamp = [:]
         tick = 0
         bulk {
             bootstrap()
@@ -205,7 +208,19 @@ final class CodexTranscriptWatcher {
         let fallbackSession: String   // file-name stem (used when session_meta was never seen)
         let sessionKey: String        // path-independent dedup stem
         let liveCutoff: Date          // one store.eventsCutoff per read, not per line
+        private let url: URL
+        private var mtimeResolved = false
+        private var mtimeValue: Date?
+        /// Consulted lazily, only for a line with no timestamp and no earlier one in the file.
+        func mtime() -> Date {
+            if !mtimeResolved {
+                mtimeResolved = true
+                mtimeValue = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+            }
+            return mtimeValue ?? Date(timeIntervalSince1970: 0)
+        }
         init(_ url: URL, liveCutoff: Date) {
+            self.url = url
             path = url.path
             fallbackSession = url.deletingPathExtension().lastPathComponent
             sessionKey = CodexHistory.sessionKey(fileName: url.lastPathComponent)
@@ -307,7 +322,13 @@ final class CodexTranscriptWatcher {
             return
         }
         guard line.type == "event_msg", line.payload?.type == "token_count" else { return }
-        let timestamp = line.timestamp.flatMap { FastTimestamp.parse($0) ?? Self.isoFrac.date(from: $0) ?? Self.iso.date(from: $0) } ?? Date()
+        // Missing/unparseable timestamp: carry the previous line's forward, else the
+        // file's mtime (same rule as the Claude parser) — never the wall clock.
+        let parsedTimestamp = line.timestamp.flatMap {
+            FastTimestamp.parse($0) ?? Self.isoFrac.date(from: $0) ?? Self.iso.date(from: $0)
+        }
+        if let parsedTimestamp { lastTimestamp[file.path] = parsedTimestamp }
+        let timestamp = parsedTimestamp ?? lastTimestamp[file.path] ?? ctx.mtime()
         let liveCutoff = ctx.liveCutoff
         if let limits = line.payload?.rate_limits {
             self.limits.observe(
@@ -346,15 +367,23 @@ final class CodexTranscriptWatcher {
             sessionId: sid, timestamp: line.timestamp ?? "",
             totalInput: signature?.input ?? usage.input_tokens ?? 0,
             totalOutput: signature?.output ?? output)
-        if timestamp >= liveCutoff {
+        // The persisted Codex watermark is authoritative (see HistoryFold.route): an
+        // event below it is already in history even when it sits above the cutoff.
+        switch HistoryFold.route(timestamp, cutoff: liveCutoff, backfilling: backfilling,
+                                 backfillFrom: backfillFrom, watermark: backfillFrom) {
+        case .live:
             if bulkReplay {
                 replayBatch.append((event, key))
                 if replayBatch.count >= Self.replayBatchSize { flushReplayBatch() }
             } else {
                 store.addTranscriptEvent(event, dedupKey: key)
             }
-        } else if backfilling, timestamp >= backfillFrom, backfillSeen.insert(key).inserted {
-            backfillBatch[UsageStore.dayKey(timestamp), default: DayAgg()].add(event)
+        case .backfill:
+            if backfillSeen.insert(key).inserted {
+                backfillBatch[UsageStore.dayKey(timestamp), default: DayAgg()].add(event)
+            }
+        case .drop:
+            break
         }
     }
 

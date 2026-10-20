@@ -64,6 +64,23 @@ swiftc Sources/TokenScope/Models.swift \
   tools/verify-window.swift \
   -o "$cache_root/window-checks"
 
+swiftc Sources/TokenScope/Models.swift \
+  Sources/TokenScope/Fmt.swift \
+  Sources/TokenScope/PollSupport.swift \
+  Sources/TokenScope/TranscriptIO.swift \
+  Sources/TokenScope/HistoryFold.swift \
+  Sources/TokenScope/CodexHistory.swift \
+  Sources/TokenScope/EventReconciler.swift \
+  Sources/TokenScope/UsageStore.swift \
+  Sources/TokenScope/ResponseScanner.swift \
+  Sources/TokenScope/HTTPResponseFramer.swift \
+  Sources/TokenScope/HTTPRequestScanner.swift \
+  Sources/TokenScope/HTTPIdentityEncodingRewriter.swift \
+  tools/verify-store.swift \
+  -o "$cache_root/store-checks"
+# Drives the real UsageStore against a scratch TOKENSCOPE_SUPPORT_DIR (never ~/Library).
+"$cache_root/store-checks"
+
 swiftc Sources/TokenScope/PollSupport.swift \
   tools/verify-lightness.swift \
   -o "$cache_root/lightness-checks"
