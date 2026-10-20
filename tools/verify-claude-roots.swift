@@ -17,7 +17,7 @@ struct RootChecks {
         defer { try? fm.removeItem(at: tmp) }
         let h = home.resolvingSymlinksInPath().path
 
-        let none = ClaudeProjectRoots.resolve(extra: [], home: home).map(\.path)
+        let none = ClaudeProjectRoots.resolve(extra: [], home: home, includeCowork: true).map(\.path)
         expect(none == ["\(h)/.claude/projects"], "default root only when no extras")
 
         let tilde = ClaudeProjectRoots.resolve(extra: ["~/x/projects"], home: home).map(\.path)
@@ -55,6 +55,81 @@ struct RootChecks {
         let broad = ClaudeProjectRoots.resolveDetailed(extra: ["/", h, "\(h)/"], home: home)
         expect(broad.roots.map(\.path) == ["\(h)/.claude/projects"] && broad.rejected.count == 3,
                "/ and $HOME rejected: \(broad)")
+
+        // Cowork root: missing dir -> not included (even when enabled)
+        let cw = ClaudeProjectRoots.coworkRoot(home: home)
+        expect(ClaudeProjectRoots.resolve(extra: [], home: home, includeCowork: true).map(\.path)
+               == ["\(h)/.claude/projects"], "missing cowork dir omitted")
+        try fm.createDirectory(at: cw, withIntermediateDirectories: true)
+        let cwp = "\(h)/Library/Application Support/Claude/local-agent-mode-sessions"
+        // ordering: primary, cowork, then extras
+        let ord = ClaudeProjectRoots.resolveDetailed(extra: ["\(h)/lean/projects"], home: home, includeCowork: true)
+        expect(ord.roots.map(\.path) == ["\(h)/.claude/projects", cwp, "\(h)/lean/projects"], "order: \(ord.roots)")
+        expect(ord.kinds[cwp] == .cowork && ord.kinds["\(h)/.claude/projects"] == .primary
+               && ord.kinds["\(h)/lean/projects"] == .extra && ClaudeProjectRoots.Kind.cowork.label == "Cowork",
+               "kinds/labels")
+        // dedup against user-supplied duplicates of the same path (trailing slash, ..)
+        let dd = ClaudeProjectRoots.resolveDetailed(
+            extra: [cwp, cwp + "/", "\(h)/Library/../Library/Application Support/Claude/local-agent-mode-sessions"],
+            home: home, includeCowork: true)
+        expect(dd.roots.map(\.path) == ["\(h)/.claude/projects", cwp] && dd.kinds[cwp] == .cowork,
+               "cowork dedup keeps built-in kind: \(dd.roots)")
+        // dedup also holds when the user lists it and the built-in is off: it becomes an extra
+        let off = ClaudeProjectRoots.resolveDetailed(extra: [cwp], home: home, includeCowork: false)
+        expect(off.roots.map(\.path) == ["\(h)/.claude/projects", cwp] && off.kinds[cwp] == .extra,
+               "opt-out leaves explicit extra intact")
+        // opt-out
+        expect(ClaudeProjectRoots.resolve(extra: [], home: home, includeCowork: false).map(\.path)
+               == ["\(h)/.claude/projects"], "opt-out drops cowork")
+        expect(ClaudeProjectRoots.existing(extra: [], home: home, includeCowork: true).map(\.path)
+               == ["\(h)/.claude/projects", cwp], "existing includes cowork")
+        // defaults parsing (isolated suite)
+        let suite = UserDefaults(suiteName: "ts-roots-\(UUID().uuidString)")!
+        expect(ClaudeProjectRoots.coworkEnabled(defaults: suite), "default on")
+        suite.set(false, forKey: ClaudeProjectRoots.includeCoworkKey)
+        expect(!ClaudeProjectRoots.coworkEnabled(defaults: suite), "false turns off")
+        suite.set(true, forKey: ClaudeProjectRoots.includeCoworkKey)
+        expect(ClaudeProjectRoots.coworkEnabled(defaults: suite), "true on")
+        suite.set("NO", forKey: ClaudeProjectRoots.includeCoworkKey)
+        expect(!ClaudeProjectRoots.coworkEnabled(defaults: suite), "string NO turns off")
+        // audit.jsonl is skipped, other transcripts are not
+        expect(ClaudeProjectRoots.isIgnoredTranscript(URL(fileURLWithPath: "/x/local_a/audit.jsonl"))
+               && !ClaudeProjectRoots.isIgnoredTranscript(URL(fileURLWithPath: "/x/subagents/agent-1.jsonl"))
+               && !ClaudeProjectRoots.isIgnoredTranscript(URL(fileURLWithPath: "/x/abc.jsonl")), "audit filter")
+        try? fm.removeItem(at: cw)
+
+        // Cowork transcripts live under hidden `.claude/` directories: the enumerator must
+        // descend into those (only for the Cowork kind), keep ignoring hidden files,
+        // audit.jsonl, node_modules and other hidden directories.
+        let tree = tmp.appendingPathComponent("tree")
+        func touch(_ rel: String) throws {
+            let u = tree.appendingPathComponent(rel)
+            try fm.createDirectory(at: u.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try Data("{}\n".utf8).write(to: u)
+        }
+        let sess = "a/b/local_1"
+        try touch("\(sess)/.claude/projects/-p/s1.jsonl")
+        try touch("\(sess)/.claude/projects/-p/s1/subagents/agent-1.jsonl")
+        try touch("\(sess)/.claude/projects/-p/.hidden.jsonl")
+        try touch("\(sess)/audit.jsonl")
+        try touch("\(sess)/.claude/audit.jsonl")
+        try touch("\(sess)/.git/objects/x.jsonl")
+        try touch("\(sess)/outputs/node_modules/pkg/x.jsonl")
+        try touch("\(sess)/outputs/ok.jsonl")
+        try touch("a/b/local_2/.claude/projects/-q/s2.jsonl")
+        let treeRoot = tree.resolvingSymlinksInPath().path
+        let cowork = ClaudeProjectRoots.enumerateTranscripts(root: tree, kind: .cowork)
+            .map { $0.resolvingSymlinksInPath().path.replacingOccurrences(of: treeRoot + "/", with: "") }.sorted()
+        expect(cowork == ["\(sess)/.claude/projects/-p/s1.jsonl",
+                          "\(sess)/.claude/projects/-p/s1/subagents/agent-1.jsonl",
+                          "\(sess)/outputs/ok.jsonl",
+                          "a/b/local_2/.claude/projects/-q/s2.jsonl"],
+               "cowork root yields .claude transcripts, skips hidden files/dirs, audit.jsonl, node_modules: \(cowork)")
+        let primary = ClaudeProjectRoots.enumerateTranscripts(root: tree, kind: .primary)
+            .map { $0.resolvingSymlinksInPath().path.replacingOccurrences(of: treeRoot + "/", with: "") }.sorted()
+        expect(primary == ["\(sess)/outputs/ok.jsonl"], "primary/extra roots keep skipping every hidden directory: \(primary)")
+        expect(ClaudeProjectRoots.enumerateTranscripts(root: tree.appendingPathComponent("missing"), kind: .cowork).isEmpty,
+               "missing root enumerates to nothing")
 
         // tolerant parsing
         expect(ClaudeProjectRoots.entries(from: " /a \n") == ["/a"], "bare string, trimmed")

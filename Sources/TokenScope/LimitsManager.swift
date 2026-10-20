@@ -3,17 +3,6 @@ import SwiftUI
 import AppKit
 import Combine
 
-/// One rate-limit window reported by claude.ai's usage endpoint.
-struct LimitWindow: Identifiable {
-    let id: String        // "five_hour" | "seven_day" | "seven_day_sonnet"
-    let label: String     // "Session · 5h" etc.
-    var utilization: Double   // 0…100
-    var resetsAt: Date?
-    var period: String?   // short rolling-window label ("5h"/"7d") for the menu bar
-
-    var fraction: Double { min(max(utilization / 100, 0), 1) }
-}
-
 /// Polls claude.ai for plan usage limits (the 5-hour session and 7-day weekly
 /// caps that gate Claude Code / Claude.ai). This is the "how close to the wall"
 /// view that complements TokenScope's raw token counting. Uses the user's
@@ -27,7 +16,8 @@ final class LimitsManager: ObservableObject {
     @Published var notificationsEnabled = true
 
     private var cookie = ""
-    private var timer: Timer?
+    // 60 s base; doubles after 3 consecutive failures up to 30 min, resets on success.
+    private let scheduler = PollScheduler(base: 60)
     private var sessionThreshold = ThresholdTracker(key: "limit_notified_session", thresholds: [25, 50, 75, 90])
     private var weeklyThreshold = ThresholdTracker(key: "limit_notified_weekly", thresholds: [50, 75, 90])
     private var weeklySonnetThreshold = ThresholdTracker(key: "limit_notified_weekly_sonnet", thresholds: [50, 75, 90])
@@ -44,11 +34,22 @@ final class LimitsManager: ObservableObject {
     }
 
     func start() {
-        timer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
-            self?.refresh()
-        }
-        refresh()
+        scheduler.start { [weak self] in self?.refresh() }
     }
+
+    /// Publish-on-change error plumbing: `errorMessage` is only assigned when the
+    /// text differs, and logging happens on a state transition (ok→error,
+    /// error→ok) or a different message — never per poll.
+    private func fail(_ message: String) {
+        let first = scheduler.failed()
+        let shown = message + (scheduler.note.map { " (\($0))" } ?? "")
+        if errorMessage != shown { errorMessage = shown }
+        if first || message != lastLoggedError {
+            lastLoggedError = message
+            FileLog.log("limits: error — \(message)")
+        }
+    }
+    private var lastLoggedError: String?
 
     private func percent(_ id: String) -> Int? {
         windows.first(where: { $0.id == id }).map { Int($0.utilization.rounded()) }
@@ -111,7 +112,7 @@ final class LimitsManager: ObservableObject {
         resolveOrgId { [weak self] orgId in
             guard let self else { return }
             guard let orgId else {
-                DispatchQueue.main.async { self.errorMessage = "Couldn't find org ID in cookie" }
+                DispatchQueue.main.async { self.fail("Couldn't find org ID in cookie") }
                 return
             }
             self.fetchUsage(orgId: orgId)
@@ -158,14 +159,14 @@ final class LimitsManager: ObservableObject {
             guard let self else { return }
             DispatchQueue.main.async {
                 if let error {
-                    self.errorMessage = "Network error: \(error.localizedDescription)"
+                    self.fail("Network error: \(error.localizedDescription)")
                     return
                 }
-                guard let http = response as? HTTPURLResponse else { self.errorMessage = "No response"; return }
+                guard let http = response as? HTTPURLResponse else { self.fail("No response"); return }
                 guard http.statusCode == 200, let data else {
-                    self.errorMessage = http.statusCode == 401 || http.statusCode == 403
+                    self.fail(http.statusCode == 401 || http.statusCode == 403
                         ? "Cookie rejected (expired?) — re-copy it"
-                        : "HTTP \(http.statusCode)"
+                        : "HTTP \(http.statusCode)")
                     return
                 }
                 self.parse(data)
@@ -186,7 +187,7 @@ final class LimitsManager: ObservableObject {
 
     private func parse(_ data: Data) {
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            errorMessage = "Couldn't parse usage response"
+            fail("Couldn't parse usage response")
             return
         }
         func window(_ key: String, _ label: String, _ period: String) -> LimitWindow? {
@@ -200,10 +201,18 @@ final class LimitsManager: ObservableObject {
         if let w = window("seven_day", "Weekly · 7d", "7d") { ws.append(w) }
         if let sn = window("seven_day_sonnet", "Weekly Sonnet · 7d", "7d") { ws.append(sn) }
 
-        windows = ws
-        lastUpdated = Date()
-        errorMessage = nil
-        FileLog.log("limits: " + ws.map { "\($0.id)=\(Int($0.utilization))%" }.joined(separator: " "))
+        // Publish only on change. `lastUpdated` moves only when the payload changed,
+        // on the first fetch, or on recovery after a failure — not on every
+        // identical poll (nothing in the UI shows it; assigning it re-ran the scene).
+        let recovered = scheduler.succeeded()
+        let changed = !LimitWindow.displayEqual(windows, ws)
+        if changed { windows = ws }
+        if changed || recovered || lastUpdated == nil { lastUpdated = Date() }
+        if errorMessage != nil { errorMessage = nil }
+        lastLoggedError = nil
+        if changed || recovered {
+            FileLog.log("limits: " + ws.map { "\($0.id)=\(Int($0.utilization))%" }.joined(separator: " "))
+        }
         maybeNotify(ws)
     }
 

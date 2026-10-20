@@ -18,6 +18,7 @@ swiftc Sources/TokenScope/Models.swift \
   Sources/TokenScope/PerformanceAggregator.swift \
   Sources/TokenScope/ProcessReaper.swift \
   Sources/TokenScope/Fmt.swift \
+  Sources/TokenScope/PollSupport.swift \
   tools/verify-models.swift \
   -o "$cache_root/model-checks"
 "$cache_root/model-checks"
@@ -42,6 +43,52 @@ swiftc Sources/TokenScope/ClaudeProjectRoots.swift \
   -o "$cache_root/roots-checks"
 "$cache_root/roots-checks"
 "$cache_root/lmstudio-checks"
+
+swiftc Sources/TokenScope/Models.swift \
+  Sources/TokenScope/CodexHistory.swift \
+  tools/verify-codex.swift \
+  -o "$cache_root/codex-checks"
+"$cache_root/codex-checks"
+
+swiftc Sources/TokenScope/Models.swift \
+  Sources/TokenScope/EventReconciler.swift \
+  Sources/TokenScope/ClaudeTranscriptParser.swift \
+  Sources/TokenScope/TranscriptIO.swift \
+  tools/verify-transcript.swift \
+  -o "$cache_root/transcript-checks"
+"$cache_root/transcript-checks"
+
+swiftc Sources/TokenScope/Models.swift \
+  Sources/TokenScope/CodexHistory.swift \
+  Sources/TokenScope/HistoryFold.swift \
+  tools/verify-window.swift \
+  -o "$cache_root/window-checks"
+
+swiftc Sources/TokenScope/Models.swift \
+  Sources/TokenScope/Fmt.swift \
+  Sources/TokenScope/PollSupport.swift \
+  Sources/TokenScope/TranscriptIO.swift \
+  Sources/TokenScope/HistoryFold.swift \
+  Sources/TokenScope/CodexHistory.swift \
+  Sources/TokenScope/EventReconciler.swift \
+  Sources/TokenScope/UsageStore.swift \
+  Sources/TokenScope/ResponseScanner.swift \
+  Sources/TokenScope/HTTPResponseFramer.swift \
+  Sources/TokenScope/HTTPRequestScanner.swift \
+  Sources/TokenScope/HTTPIdentityEncodingRewriter.swift \
+  Sources/TokenScope/TranscriptWatcher.swift \
+  Sources/TokenScope/ClaudeProjectRoots.swift \
+  Sources/TokenScope/ClaudeTranscriptParser.swift \
+  tools/verify-store.swift \
+  -o "$cache_root/store-checks"
+# Drives the real UsageStore against a scratch TOKENSCOPE_SUPPORT_DIR (never ~/Library).
+"$cache_root/store-checks"
+
+swiftc Sources/TokenScope/PollSupport.swift \
+  tools/verify-lightness.swift \
+  -o "$cache_root/lightness-checks"
+"$cache_root/lightness-checks"
+"$cache_root/window-checks"
 
 if [[ "${CLI_ONLY:-0}" == "1" ]]; then
   print "CLI-only verification complete."

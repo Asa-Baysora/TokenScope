@@ -57,11 +57,14 @@ final class StatusManager: ObservableObject {
     @Published private(set) var lastUpdated: Date?
     @Published var notificationsEnabled = true
 
-    struct Component: Identifiable { let id: String; let name: String; let status: String }
-    struct Incident: Identifiable { let id: String; let name: String; let status: String; let update: String }
+    struct Component: Identifiable, Equatable { let id: String; let name: String; let status: String }
+    struct Incident: Identifiable, Equatable { let id: String; let name: String; let status: String; let update: String }
 
     let service: Service
-    private var timer: Timer?
+    // 300 s base; backs off (doubling after 3 consecutive failures, cap 30 min).
+    private let scheduler = PollScheduler(base: 300)
+    private var lastLoggedStatus: String?
+    private var failureLogged = false
 
     init(service: Service = .claude) {
         self.service = service
@@ -71,10 +74,17 @@ final class StatusManager: ObservableObject {
     }
 
     func start() {
-        timer = Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { [weak self] _ in
-            self?.refresh()
+        scheduler.start { [weak self] in self?.refresh() }
+    }
+
+    private func fetchFailed(_ why: String) {
+        DispatchQueue.main.async {
+            let first = self.scheduler.failed()
+            if first || !self.failureLogged {
+                self.failureLogged = true
+                FileLog.log("\(self.service.displayName) status: fetch failed — \(why)")
+            }
         }
-        refresh()
     }
 
     func setNotifications(_ on: Bool) {
@@ -96,8 +106,12 @@ final class StatusManager: ObservableObject {
 
     func refresh() {
         let req = URLRequest(url: service.endpoint, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 15)
-        URLSession.shared.dataTask(with: req) { [weak self] data, _, _ in
-            guard let self, let data else { return }
+        URLSession.shared.dataTask(with: req) { [weak self] data, response, error in
+            guard let self else { return }
+            guard let data, error == nil, (response as? HTTPURLResponse).map({ $0.statusCode == 200 }) ?? true else {
+                self.fetchFailed(error?.localizedDescription ?? "bad response")
+                return
+            }
             self.parse(data)
         }.resume()
     }
@@ -106,7 +120,10 @@ final class StatusManager: ObservableObject {
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let status = json["status"] as? [String: Any],
               let ind = status["indicator"] as? String,
-              let desc = status["description"] as? String else { return }
+              let desc = status["description"] as? String else {
+            fetchFailed("unparseable summary")
+            return
+        }
 
         var degradedComps: [Component] = []
         if let comps = json["components"] as? [[String: Any]] {
@@ -146,12 +163,22 @@ final class StatusManager: ObservableObject {
         DispatchQueue.main.async {
             let previous = self.indicator
             let firstFetch = self.lastUpdated == nil
-            self.indicator = effectiveInd
-            self.summary = effectiveDesc
-            self.degraded = degradedComps
-            self.incidents = incs
-            self.lastUpdated = Date()
-            FileLog.log("\(self.service.displayName) status: \(effectiveInd) — \(effectiveDesc) (raw \(ind)); degraded=\(degradedComps.count) incidents=\(incs.count)")
+            let recovered = self.scheduler.succeeded()
+            self.failureLogged = false
+            // Publish each property only when it differs (five assignments every
+            // poll re-ran the scene). `lastUpdated` moves on first fetch, a changed
+            // payload, or recovery; it is the first-fetch sentinel above.
+            var changed = false
+            if self.indicator != effectiveInd { self.indicator = effectiveInd; changed = true }
+            if self.summary != effectiveDesc { self.summary = effectiveDesc; changed = true }
+            if self.degraded != degradedComps { self.degraded = degradedComps; changed = true }
+            if self.incidents != incs { self.incidents = incs; changed = true }
+            if changed || recovered || firstFetch { self.lastUpdated = Date() }
+            let line = "\(self.service.displayName) status: \(effectiveInd) — \(effectiveDesc) (raw \(ind)); degraded=\(degradedComps.count) incidents=\(incs.count)"
+            if line != self.lastLoggedStatus || recovered {
+                self.lastLoggedStatus = line
+                FileLog.log(line)
+            }
             if !firstFetch, previous != effectiveInd, self.notificationsEnabled {
                 if effectiveInd == "none" {
                     Notifier.post(title: "\(self.service.displayName) is back online",

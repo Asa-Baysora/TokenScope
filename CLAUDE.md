@@ -27,14 +27,20 @@ swift build -c release                       # compile
 ./build-app.sh                               # build TokenScope.app (bundle + icon)
 
 # Pure regression suites (framework-free so CommandLineTools-only Macs work):
-swiftc Sources/TokenScope/Models.swift Sources/TokenScope/LimitRailPresentation.swift Sources/TokenScope/EventReconciler.swift Sources/TokenScope/PerformanceAggregator.swift Sources/TokenScope/ProcessReaper.swift Sources/TokenScope/Fmt.swift tools/verify-models.swift -o /tmp/tokenscope-model-checks && /tmp/tokenscope-model-checks
+swiftc Sources/TokenScope/Models.swift Sources/TokenScope/LimitRailPresentation.swift Sources/TokenScope/EventReconciler.swift Sources/TokenScope/PerformanceAggregator.swift Sources/TokenScope/ProcessReaper.swift Sources/TokenScope/Fmt.swift Sources/TokenScope/PollSupport.swift tools/verify-models.swift -o /tmp/tokenscope-model-checks && /tmp/tokenscope-model-checks
 swiftc Sources/TokenScope/Models.swift Sources/TokenScope/HTTPRequestScanner.swift Sources/TokenScope/HTTPIdentityEncodingRewriter.swift Sources/TokenScope/HTTPResponseFramer.swift Sources/TokenScope/ResponseScanner.swift tools/verify-protocols.swift -o /tmp/tokenscope-protocol-checks && /tmp/tokenscope-protocol-checks
 swiftc Sources/TokenScope/Models.swift Sources/TokenScope/LMStudioEventParser.swift tools/verify-lmstudio.swift -o /tmp/tokenscope-lmstudio-checks && /tmp/tokenscope-lmstudio-checks
 swiftc Sources/TokenScope/ClaudeProjectRoots.swift tools/verify-claude-roots.swift -o /tmp/tokenscope-roots-checks && /tmp/tokenscope-roots-checks
+swiftc Sources/TokenScope/Models.swift Sources/TokenScope/CodexHistory.swift tools/verify-codex.swift -o /tmp/tokenscope-codex-checks && /tmp/tokenscope-codex-checks
+swiftc Sources/TokenScope/Models.swift Sources/TokenScope/EventReconciler.swift Sources/TokenScope/ClaudeTranscriptParser.swift tools/verify-transcript.swift -o /tmp/tokenscope-transcript-checks && /tmp/tokenscope-transcript-checks
+swiftc Sources/TokenScope/Models.swift Sources/TokenScope/CodexHistory.swift Sources/TokenScope/HistoryFold.swift tools/verify-window.swift -o /tmp/tokenscope-window-checks && /tmp/tokenscope-window-checks
+swiftc Sources/TokenScope/{Models,Fmt,PollSupport,TranscriptIO,HistoryFold,CodexHistory,EventReconciler,UsageStore,ResponseScanner,HTTPResponseFramer,HTTPRequestScanner,HTTPIdentityEncodingRewriter,TranscriptWatcher,ClaudeProjectRoots,ClaudeTranscriptParser}.swift tools/verify-store.swift -o /tmp/tokenscope-store-checks && /tmp/tokenscope-store-checks   # real UsageStore on a scratch TOKENSCOPE_SUPPORT_DIR
+swiftc Sources/TokenScope/PollSupport.swift tools/verify-lightness.swift -o /tmp/tokenscope-lightness-checks && /tmp/tokenscope-lightness-checks   # backoff, publish-on-change, today binary search, log rotation
+# read-only corpus sanity: /tmp/tokenscope-transcript-checks --corpus ~/.claude/projects/<project-dir>
 
 # VERIFY UI BEFORE INSTALLING — render the menu with real data:
 .build/release/TokenScope --snapshot /tmp/menu.png
-SNAPSHOT_PERIOD=month SNAPSHOT_HIDE_WEEKENDS=1 .build/release/TokenScope --snapshot /tmp/menu-30d.png
+SNAPSHOT_PERIOD=month SNAPSHOT_HIDE_WEEKENDS=1 .build/release/TokenScope --snapshot /tmp/menu-28d.png
 # SNAPSHOT_PERIOD=today|week|month, SNAPSHOT_HIDE_WEEKENDS=0|1, SNAPSHOT_BAR_STYLE=stacked|grouped, SNAPSHOT_INCLUDE_CACHE=0|1, SNAPSHOT_CHART_MODE=bar|line
 # SNAPSHOT_TAB=usage|now|history|settings, SNAPSHOT_LIMITS=all|three|two|one|none
 
@@ -62,19 +68,58 @@ reason (`MenuView(snapshotInline: true)`).
   `maxHeight` collapses the entire middle of the menu invisibly (this shipped
   broken for several rounds before being caught).
 - **The events window is whole days.** `UsageStore.eventsCutoff` is
-  startOfDay(now) − 31 days. A calendar day is either entirely live (in
-  `events`) or entirely frozen (in `history`) — `trim()`/`fold()`/backfill all
-  rely on this; don't reintroduce a rolling timestamp cutoff.
+  startOfDay(now) − **28** days (`HistoryFold.retentionDays`; Claude Code deletes
+  transcripts by mtime at ~30 days, so a live day must never outlive its files).
+  A calendar day is either entirely live (in `events`) or entirely frozen (in
+  `history`) — `trim()`/`fold()`/backfill all rely on this; don't reintroduce a
+  rolling timestamp cutoff. Window/fold/journal logic is pure in `HistoryFold.swift`
+  (checks: `tools/verify-window.swift`; the real store: `tools/verify-store.swift`). The
+  whole-day age-out advances the watermarks to the cutoff; the 150k overflow fold folds
+  the oldest WHOLE day and advances them to that day's end. The watermark is
+  authoritative: both ingest paths drop transcript events below it (`isFolded`), and
+  dropped dedup keys WOULD be re-appended without that. A fold into an existing
+  day+provider bucket merges by max, not sum. Journaled local events that aged out while
+  closed are folded at load (LM Studio) or held until the transcript backfill supplies
+  their Ollama twins (proxy/Desktop), then folded, then the journal is compacted.
+  **Claude watermarks are PER ROOT** (`rootCompleteThrough`, schema 3): a shared one made
+  Cowork (older mtimes) start at EOF and lose 78 days. Backfill merges ADDITIVELY across
+  roots (`HistoryFold.mergeAdditive`); max-merge (`mergeByMax`) is only for re-folding the
+  same records. History/journal writes are deterministic (sorted keys, stable sort, skipped
+  when unchanged). Snapshot waits on `store.replayComplete`, not a fixed sleep.
+  `TOKENSCOPE_SUPPORT_DIR` redirects the support dir and the log (testing).
+  `events` must stay sorted: an in-place dedup replacement keeps the first-seen timestamp.
 - **Double-count prevention.** A Claude Code call routed through the proxy is
   seen twice (proxy + transcript). Live: ±90s output-token match marks the proxy
   copy `shadowed`. Startup: `replayFinished` re-reconciles persisted proxy
-  events. Totals exclude shadowed events; don't count them anywhere else.
+  events; shadow decisions on journaled events are persisted (tombstone lines) so a
+  restart cannot resurrect them. Totals exclude shadowed events; don't count them anywhere else.
+- **Claude transcript accuracy** (`ClaudeTranscriptParser.swift`). ~half of messages
+  (those ending in `tool_use`) never get a `stop_reason`, so every line keeps the
+  `message_start` output snapshot (1–10 tokens). One content block per line: chars are
+  accumulated per `message.id:requestId`, output = max(observed, ceil(chars/4)),
+  `tokenAccuracy = .estimated`; a finalized line is `.exact` and always beats it in
+  `EventReconciler`. `usage.iterations[]` entries with type ≠ "message" (advisor
+  calls) are a separate model's tokens → extra events `"<key>:iter<i>"`, model
+  suffixed " (advisor)". Missing `timestamp` → previous line's in that file, else
+  file mtime, never `Date()` (same rule in the Codex watcher). Carry-forward updates from
+  any decoded line with a timestamp; estimated output is capped at 128k and measured in
+  UTF-8 bytes. Cowork transcripts sit under hidden `.claude/` dirs: the enumerator
+  descends into them for the Cowork root only.
 - **Transcript dedup** is `message.id:requestId`; `EventReconciler` keeps the
   strongest observation so a final rewrite upgrades a partial/zero record and a
   later stale replay cannot downgrade it.
+- **Codex accounting.** `fold()` must advance the Codex watermark too (else the next
+  backfill doubles folded days); backfill guards are per provider. Codex
+  `cached_input_tokens` ⊂ `input_tokens` → store input − cached. Dedup keys are
+  `rollout stem + timestamp + totals`, never file path (sessions/ ↔ archived_sessions/
+  moves); skip a `token_count` identical to the previous total. `daily-history.json`
+  `schema` < 2 triggers a one-time Codex strip + rebuild. Rules in `CodexHistory.swift`.
 - **Byte-level pre-filters** in `TranscriptWatcher.parse` (`"assistant"`,
   `"type":"summary"`, `"type":"user"` markers) keep the 30-day replay fast.
-  Don't JSON-decode every line.
+  Don't JSON-decode every line. They are SIMD scans over the raw chunked read buffer
+  (`TranscriptIO`): no per-line `Data` copies, no `readToEnd()` of whole files, no
+  per-line `ISO8601DateFormatter` (`FastTimestamp`). Launch replay batches store ingest
+  (`ingest(batch:)`, 500 events); live tailing stays per-line.
 - **The proxy is a transparent TCP relay.** It never rewrites response bytes;
   the only request mutation is forcing `Accept-Encoding: identity` so responses
   stay scannable. Request and response transport use bounded HTTP/1.1 framing
@@ -133,11 +178,18 @@ reason (`MenuView(snapshotInline: true)`).
 
 ## Efficiency (it's a 24/7 menu-bar app — keep idle cost ~0)
 
-Measured idle footprint (2026-06-11, ~7.9k events in window): **~0.2% CPU**
-average (most samples 0.0%, brief sub-2% blips from the 1 s hot-file check and
-pollers), **~165 MB RSS** (almost all SwiftUI/AppKit baseline — our data is a
-couple MB), 8 threads, ~7 KB log. CPU is the metric to guard; memory is
-framework baseline and not cheaply reducible without leaving SwiftUI.
+Measured footprint (installed v0.1.7, 2026-10-19, 4d20h uptime, ~17.7k events in
+window): **~0.6% CPU lifetime average**, 2.5–2.9% while a session is writing
+(the old "~0.2%" figure was from 2026-06-11 with ~7.9k events). The measured
+hot spot was `menuTitle` filtering every event with `Calendar.isDateInToday` on
+each scene re-run (141 ms of a 219 ms/20 s sample), plus limits/status pollers
+re-publishing unchanged values every 1–5 min. **Target after the lightness work
+(binary-searched + cached today total, publish-on-change pollers, backoff, 1 MB
+log cap, 0.3 s watcher timer leeway): back to ~0.2% average, ≲1% while a session
+writes — not yet re-measured against an installed build.** ~165 MB RSS (almost
+all SwiftUI/AppKit baseline), 8 threads, log capped at ~1 MB + one `.1` copy
+(was 7 MB / 104k lines, 63k of them `limits:`). CPU is the metric to guard;
+memory is framework baseline and not cheaply reducible without leaving SwiftUI.
 
 Idle CPU must stay near zero. Measured regressions that were fixed; don't undo:
 - **TranscriptWatcher** stats only recently-modified ("hot") files each second
@@ -146,11 +198,27 @@ Idle CPU must stay near zero. Measured regressions that were fixed; don't undo:
 - **UsageStore's clock timer runs only while calls are live** (`startTickingIfNeeded`),
   stopping itself when `liveCalls` empties — no idle wakeups recomputing the label.
 - **FileLog holds one file handle open** and does NOT log per-event (per-event at
-  replay scale produced a 17 MB / 178k-line log). Lifecycle summaries only.
-- Pollers: limits/status 5 min, Ollama health + `/api/ps` 10 s, LM Studio status +
-  loaded models 30 s. Ollama Desktop DB/WAL observation is vnode-driven and debounced.
-  Don't add per-second work.
-- **Publish only on significant change.** `updateRuntimeHealth` gates on
+  replay scale produced a 17 MB / 178k-line log). Lifecycle summaries only, and
+  pollers log only on change / state transition (ok→error, error→ok), never per poll.
+  Capped at ~1 MB: truncate-and-rename to `TokenScope.log.1` on the logging queue
+  (`LogRotator`, checked in `tools/verify-lightness.swift`).
+- Pollers: Claude limits 60 s, ChatGPT limits 60 s, status 5 min, Ollama health +
+  `/api/ps` 10 s, LM Studio status + loaded models 30 s. Claude/ChatGPT limits and
+  status back off after 3 consecutive failures (interval doubles, cap 30 min, reset
+  on success; `PollScheduler`/`PollBackoff` in `PollSupport.swift`; the backed-off
+  state shows in the error text the limits card displays). Ollama Desktop DB/WAL
+  observation is vnode-driven and debounced. Don't add per-second work. The 1 s
+  watcher timers carry 0.3 s leeway (coalescing) — watcher logic counts ticks, never
+  assumes an exact 1 s cadence.
+- **Today total is cached, not re-filtered.** `events` is sorted, so
+  `events(in:)` binary-searches the window start (`EventRange`), and `menuTitle`
+  reads a cache keyed on (calendar day) and cleared by `events.didSet` (any
+  ingest/shadow/trim/fold) and a one-shot midnight timer. Never filter all events
+  per scene re-run.
+- **Publish only on significant change.** Limits/status managers follow the same
+  rule (`LimitWindow.displayEquals`: 0.1 pt, 1 s): assign only when different;
+  `lastUpdated` moves only on a changed payload, first fetch, or recovery from a
+  failure (not every identical poll). `updateRuntimeHealth` gates on
   `RuntimeHealth.significantlyDiffers` (excludes the `lastSuccess`/`lastEvent`
   heartbeats — kept in a non-published pulse map, overlaid by the computed
   `runtimeHealth`); `setLoadedModels` gates on `LoadedModel.displayEquals`
@@ -181,7 +249,7 @@ Idle CPU must stay near zero. Measured regressions that were fixed; don't undo:
   If absent, it is rebuilt with a one-time backfill (≤366 days) on next launch.
 - Codex raw session logs remain in `~/.codex/sessions/**/*.jsonl`; TokenScope
   reads only `session_meta` and `token_count` records, then retains the same
-  31-day event window and permanent day aggregates as other local sources. Its
+  28-day event window and permanent day aggregates as other local sources. Its
   own persisted watermark drives the one-time ≤366-day history backfill.
 - `~/Library/Logs/TokenScope.log` — lifecycle summaries and sanitized diagnostics;
   first place to look when verifying behavior. Per-event logging is deliberately off.

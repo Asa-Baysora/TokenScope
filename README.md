@@ -10,7 +10,7 @@ service status.
 Token usage and local-runtime activity come from four collector families,
 reconciled automatically:
 
-1. **Claude Code transcripts** (`~/.claude/projects/**/*.jsonl`, plus any `ExtraClaudeProjectDirs` roots for `CLAUDE_CONFIG_DIR` sessions). Every API response
+1. **Claude Code transcripts** (`~/.claude/projects/**/*.jsonl`, Claude Cowork / Desktop agent sessions under `~/Library/Application Support/Claude/local-agent-mode-sessions` when present (opt out with `defaults write com.tokenscope IncludeCoworkSessions -bool false`), plus any `ExtraClaudeProjectDirs` roots for `CLAUDE_CONFIG_DIR` sessions). Every API response
    Claude Code receives is logged there with exact `usage` counts (input, output,
    cache read, cache write), the session ID, and the project directory. TokenScope
    tails these files once a second. This covers native Anthropic usage *and* Claude
@@ -134,7 +134,7 @@ The window separates the two things it measures by **scope**:
   lands at message end), plus loaded Ollama and LM Studio models with runtime detail.
   *Latest calls*: the 8 most recent with operation, lifecycle/error state, accuracy,
   token counts, and available performance detail; not period-scoped.
-- **Usage** — obeys the Today / 7 Days / 30 Days picker (with a source caption):
+- **Usage** — obeys the Today / 7 Days / 28 Days picker (with a source caption):
   the bar chart (per **hour** for Today, per **day** otherwise; future slots blank)
   with a Stacked ↔ Grouped toggle, "Hide weekends" filter, and a dashed kernel-
   regression trendline; provider totals with per-model breakdown; a shared Ollama /

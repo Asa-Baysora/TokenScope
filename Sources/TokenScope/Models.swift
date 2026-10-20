@@ -75,7 +75,9 @@ enum CodexTrackingPolicy {
 /// operational fields; unknown is always preferable to inventing attribution.
 struct UsageEvent: Identifiable, Codable, Equatable {
     let id: UUID
-    let timestamp: Date
+    /// `var` only so an in-place dedup replacement can keep the FIRST-seen timestamp
+    /// (see `EventReconciler.replacement`); nothing else mutates it.
+    var timestamp: Date
     let startedAt: Date?
     let provider: UsageOrigin
     let source: EventSource
@@ -232,8 +234,12 @@ struct Totals {
     /// which never persists runtime counts). Kept separate so the UI can say
     /// "tokens unavailable" instead of fabricating a "↑ 0 ↓ 0".
     var unmetered = 0
+    /// Calls whose output was estimated (streamed count, no final usage yet).
+    /// Drives the "~" marker on totals: when > 0 the output sum is a floor.
+    var estimated = 0
 
     mutating func add(_ e: UsageEvent) {
+        if e.tokenAccuracy == .estimated { estimated += 1 }
         input += e.inputTokens
         output += e.outputTokens
         cacheRead += e.cacheReadTokens
@@ -376,7 +382,7 @@ enum StatsPeriod: String, CaseIterable, Identifiable {
         switch self {
         case .today: return "Today"
         case .week: return "7 Days"
-        case .month: return "30 Days"
+        case .month: return "28 Days"
         }
     }
 
@@ -384,7 +390,7 @@ enum StatsPeriod: String, CaseIterable, Identifiable {
         switch self {
         case .today: return 1
         case .week: return 7
-        case .month: return 30
+        case .month: return 28
         }
     }
 }

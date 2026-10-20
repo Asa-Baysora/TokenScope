@@ -2,9 +2,18 @@ import Foundation
 import Combine
 
 final class UsageStore: ObservableObject {
-    static let retentionDays = 31   // a hair more than the longest display window
+    static let retentionDays = HistoryFold.retentionDays   // 28 whole days; see HistoryFold
 
-    @Published private(set) var events: [UsageEvent] = []   // oldest → newest (sorted after replay)
+    // oldest → newest (kept sorted by ingest/merge; `events(in:)` binary-searches it).
+    // Every mutation (ingest, shadowing, trim, fold, replay sort) funnels through here,
+    // so the didSet is the single invalidation point for the today-totals cache.
+    @Published private(set) var events: [UsageEvent] = [] {
+        didSet { todayCache = nil }
+    }
+    /// menu-bar "tokens today" (input + output), valid for one calendar day and
+    /// until `events` next mutates. Not published: it is derived state.
+    private var todayCache: (dayStart: Date, tokens: Int)?
+    private var midnightTimer: Timer?
     @Published private(set) var liveCalls: [LiveCall] = []
     @Published var proxyStatus = "proxy starting…"
     @Published var proxyHealthy = false
@@ -34,7 +43,23 @@ final class UsageStore: ObservableObject {
     @Published private(set) var now = Date()
 
     /// All usage before this date is fully captured in `history`.
+    /// Since schema 3 this is the FLOOR of the per-root Claude watermarks
+    /// (`rootHistoryCompleteThrough`) once any exist, kept for the journal
+    /// partition and the store-level `isFolded` backstop; the watcher's per-root
+    /// watermark is what decides backfill and drops.
     private(set) var historyCompleteThrough = Date(timeIntervalSince1970: 0)
+    /// Claude transcript history is complete through this date PER ROOT (primary,
+    /// Cowork, extras; key = standardized root path). A root removed from the
+    /// config keeps its entry (harmless).
+    private(set) var rootHistoryCompleteThrough: [String: Date] = [:]
+    /// Loaded a pre-3 history file: the single Claude watermark has not yet been
+    /// fanned out to per-root entries. While true `saveHistory` keeps writing
+    /// schema 2, so a save before the seed can never strand a schema-3 file with
+    /// no root entries (which would re-backfill the primary root and double it).
+    private var legacySeedPending = false
+    /// True once the Claude transcript replay (and its backfill) has finished.
+    /// Snapshot waits on this instead of a fixed sleep.
+    private(set) var replayComplete = false
     /// Codex logs are independent from Claude Code transcripts, so their
     /// one-time historical replay needs its own persisted watermark.
     private(set) var codexHistoryCompleteThrough = Date(timeIntervalSince1970: 0)
@@ -43,11 +68,19 @@ final class UsageStore: ObservableObject {
     let upstreamPort: UInt16
 
     private var eventIDByDedupKey: [String: UUID] = [:]
+    /// event id → journal key, for the persisted local events (proxy / Desktop / LM
+    /// Studio) currently in `events`. Lets a shadow decision be written back.
+    private var journalKeyByID: [UUID: String] = [:]
+    /// Journaled proxy / Ollama Desktop records that aged out while the app was
+    /// closed. Held (not folded) until the transcript backfill can supply their
+    /// Claude-Code-via-Ollama twins; see `foldPendingAged`.
+    private var pendingAged: [(key: String, event: UsageEvent)] = []
+    private var dayChangedObserver: NSObjectProtocol?
     private var timer: Timer?
     private let ioQueue = DispatchQueue(label: "tokenscope.store-io", qos: .utility)
 
-    private static let supportDir = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent("Library/Application Support/TokenScope")
+    /// `TOKENSCOPE_SUPPORT_DIR` redirects this (and the log); see `AppPaths`.
+    private static let supportDir = AppPaths.supportDir
     private static let proxyEventsURL = supportDir.appendingPathComponent("proxy-events.jsonl")
     private static let localEventsURL = supportDir.appendingPathComponent("usage-events-v2.jsonl")
     private static let historyURL = supportDir.appendingPathComponent("daily-history.json")
@@ -55,8 +88,14 @@ final class UsageStore: ObservableObject {
     private struct HistoryFile: Codable {
         var completeThrough: Double
         var codexCompleteThrough: Double?
+        var schema: Int?
+        var rootCompleteThrough: [String: Double]?
         var days: [String: DayAgg]
     }
+
+    /// daily-history.json schema. 3 = per-root Claude watermarks. (The Codex
+    /// one-time strip is keyed on `CodexHistory.historySchema`, still 2.)
+    static let historySchema = 3
 
     private static let dayKeyFmt: DateFormatter = {
         let f = DateFormatter()
@@ -67,11 +106,7 @@ final class UsageStore: ObservableObject {
 
     /// Events-window boundary, aligned to whole days so a day is either entirely
     /// live (in `events`) or entirely frozen (in `history`) — never split.
-    var eventsCutoff: Date {
-        let cal = Calendar.current
-        return cal.date(byAdding: .day, value: -Self.retentionDays, to: cal.startOfDay(for: Date()))
-            ?? Date().addingTimeInterval(-Double(Self.retentionDays) * 86400)
-    }
+    var eventsCutoff: Date { HistoryFold.cutoff(now: Date()) }
 
     /// Proxy observations have no on-disk source of truth (transcripts do), so they
     /// are persisted here to survive restarts within the retention window.
@@ -90,14 +125,56 @@ final class UsageStore: ObservableObject {
         let event: UsageEvent
     }
 
+    /// Tombstone appended when reconcile shadows a journaled event: the event
+    /// record itself was written unshadowed, and rewriting the append-only journal
+    /// per decision is wasteful. The loader applies these by key; compaction folds
+    /// the flag into the rewritten event record.
+    private struct PersistedShadowFlag: Codable {
+        let schema: Int
+        let shadowedKey: String
+    }
+
     init() {
         let d = UserDefaults.standard
         let p = d.integer(forKey: "ProxyPort")
         let u = d.integer(forKey: "OllamaPort")
         proxyPort = p > 0 ? UInt16(p) : 11435
         upstreamPort = u > 0 ? UInt16(u) : 11434
-        loadPersistedLocalEvents()
+        // History first: aged-out journal records fold into it during the journal load.
         loadHistory()
+        loadPersistedLocalEvents()
+        scheduleMidnightRollover()
+        // The one-shot timer below can be skipped by sleep or a clock/timezone
+        // change; the system's day-change notification covers those.
+        dayChangedObserver = NotificationCenter.default.addObserver(
+            forName: .NSCalendarDayChanged, object: nil, queue: .main
+        ) { [weak self] _ in self?.dayRolledOver() }
+    }
+
+    deinit {
+        if let o = dayChangedObserver { NotificationCenter.default.removeObserver(o) }
+        midnightTimer?.invalidate()
+    }
+
+    private func dayRolledOver() {
+        todayCache = nil
+        now = Date()
+        scheduleMidnightRollover()
+    }
+
+    /// One-shot timer at the next local midnight: drops the today cache and bumps
+    /// `now` so the menu-bar total resets to the new day even when nothing else
+    /// publishes overnight (the clock timer only runs while calls are live).
+    private func scheduleMidnightRollover() {
+        midnightTimer?.invalidate()
+        let cal = Calendar.current
+        guard let next = cal.date(byAdding: .day, value: 1, to: cal.startOfDay(for: Date())) else { return }
+        let t = Timer(fire: next.addingTimeInterval(1), interval: 0, repeats: false) { [weak self] _ in
+            self?.dayRolledOver()
+        }
+        t.tolerance = 30
+        RunLoop.main.add(t, forMode: .common)
+        midnightTimer = t
     }
 
     /// The clock timer only runs while calls are in flight — it drives the live
@@ -156,24 +233,102 @@ final class UsageStore: ObservableObject {
         ingest(e, dedupKey: dedupKey, persist: true)
     }
 
+    /// Bulk transcript ingest for launch replay (non-persisted, replayable sources
+    /// only). Same dedup semantics as the per-event path: keys already in the store
+    /// go through `EventReconciler.preferred(existing, incoming)` (replace in place,
+    /// keep the `shadowed` flag, ties keep the existing record), and repeats inside
+    /// the batch fold the same way. New events are then merged in chronological
+    /// order with ONE sort/merge and ONE `events` publish per batch, and the window
+    /// is trimmed once. The per-event live double-count matcher
+    /// (`reconcileDuplicates`) is deliberately not run here: replay always ends with
+    /// `replayFinished`, whose full pass shadows every proxy/desktop event that has
+    /// a transcript twin. Live (post-replay) arrivals keep using `addTranscriptEvent`.
+    func ingest(batch: [(event: UsageEvent, dedupKey: String)]) {
+        guard !batch.isEmpty else { return }
+        DispatchQueue.main.async {
+            // 1. Fold repeats within the batch (first-seen order preserved).
+            // 0. The history watermark is authoritative: an event below it is already
+            //    inside history (a replay of a folded day), so it never goes live.
+            var slot: [String: Int] = [:]
+            var unique: [(event: UsageEvent, dedupKey: String)] = []
+            unique.reserveCapacity(batch.count)
+            for item in batch where !self.isFolded(item.event) {
+                if let i = slot[item.dedupKey] {
+                    // First-seen timestamp is kept (see EventReconciler.replacement).
+                    unique[i].event = EventReconciler.replacement(existing: unique[i].event, incoming: item.event)
+                        ?? unique[i].event
+                } else {
+                    slot[item.dedupKey] = unique.count
+                    unique.append(item)
+                }
+            }
+            // 2. Keys already in the store: in-place replace when incoming is stronger.
+            var fresh: [UsageEvent] = []
+            fresh.reserveCapacity(unique.count)
+            var indexByID: [UUID: Int]?
+            for item in unique {
+                guard let existingID = self.eventIDByDedupKey[item.dedupKey] else {
+                    fresh.append(item.event)
+                    self.eventIDByDedupKey[item.dedupKey] = item.event.id
+                    continue
+                }
+                if indexByID == nil {
+                    var m: [UUID: Int] = [:]
+                    m.reserveCapacity(self.events.count)
+                    for (i, e) in self.events.enumerated() { m[e.id] = i }
+                    indexByID = m
+                }
+                guard let index = indexByID?[existingID] else {
+                    // Key map points at an event that is gone (folded); treat as new.
+                    fresh.append(item.event)
+                    self.eventIDByDedupKey[item.dedupKey] = item.event.id
+                    continue
+                }
+                let existing = self.events[index]
+                // Same slot, same (first-seen) timestamp: `events` stays sorted.
+                guard let event = EventReconciler.replacement(existing: existing, incoming: item.event) else { continue }
+                self.events[index] = event
+                self.eventIDByDedupKey[item.dedupKey] = event.id
+            }
+            // 3. One chronological merge of the new events.
+            self.mergeChronologically(fresh)
+            self.trim()
+            #if DEBUG
+            self.assertSorted()
+            #endif
+        }
+    }
+
+    private func mergeChronologically(_ incoming: [UsageEvent]) {
+        guard !incoming.isEmpty else { return }
+        events = EventMerge.merge(events, incoming)
+    }
+
     private func ingest(_ incoming: UsageEvent, dedupKey: String, persist: Bool) {
         DispatchQueue.main.async {
+            guard !self.isFolded(incoming) else { return }
             var event = incoming
             if let existingID = self.eventIDByDedupKey[dedupKey],
                let index = self.events.firstIndex(where: { $0.id == existingID }) {
                 let existing = self.events[index]
-                let preferred = EventReconciler.preferred(existing, incoming)
-                guard preferred.id != existing.id else { return }
-                event.shadowed = existing.shadowed
+                // Keeps the first-seen timestamp and the shadowed flag, so the slot
+                // stays in sorted position (see EventReconciler.replacement).
+                guard let replaced = EventReconciler.replacement(existing: existing, incoming: incoming) else { return }
+                event = replaced
                 self.events[index] = event
                 self.eventIDByDedupKey[dedupKey] = event.id
+                self.journalKeyByID[existing.id] = nil
             } else {
                 self.appendEvent(event)
                 self.eventIDByDedupKey[dedupKey] = event.id
             }
+            if persist { self.journalKeyByID[event.id] = dedupKey }
             self.reconcileDuplicates(around: event)
             self.trim()
             if persist { self.persistLocalEvent(event, key: dedupKey) }
+            #if DEBUG
+            self.assertSorted()
+            #endif
             // Intentionally not logged per-event: at thousands of events/replay this
             // dominated both the log size and the write overhead. Lifecycle summaries
             // (replay complete, proxy, limits, status) are logged instead.
@@ -199,9 +354,9 @@ final class UsageStore: ObservableObject {
                 let transcript = event.source == .transcript ? event : candidate
                 guard transcript.tokenAccuracy == .exact else { continue }
                 if candidate.source == .proxy {
-                    events[i].shadowed = true
+                    markShadowed(at: i)
                 } else if let eventIndex = events.firstIndex(where: { $0.id == event.id }) {
-                    events[eventIndex].shadowed = true
+                    markShadowed(at: eventIndex)
                 }
                 break
             }
@@ -213,13 +368,46 @@ final class UsageStore: ObservableObject {
             guard candidate.id != event.id, !candidate.shadowed,
                   EventReconciler.desktopAndProxyOverlap(candidate, event) else { continue }
             if candidate.source == .ollamaDesktop {
-                events[i].shadowed = true
+                markShadowed(at: i)
             } else if let eventIndex = events.firstIndex(where: { $0.id == event.id }) {
-                events[eventIndex].shadowed = true
+                markShadowed(at: eventIndex)
             }
             break
         }
     }
+
+    /// Shadows `events[i]` and, for a journaled event, persists the decision (the
+    /// journal record was written unshadowed; without this a restart resurrects it).
+    private func markShadowed(at i: Int) {
+        guard !events[i].shadowed else { return }
+        events[i].shadowed = true
+        if let key = journalKeyByID[events[i].id] { persistShadowFlag(key) }
+    }
+
+    /// True when the event's day is already inside frozen history. The watermark is
+    /// authoritative: transcript sources only (local proxy/Desktop/LM Studio events
+    /// have no watermark and are never replayed).
+    private func isFolded(_ e: UsageEvent) -> Bool {
+        switch e.source {
+        case .transcript: return e.timestamp < historyCompleteThrough
+        case .codexTranscript: return e.timestamp < codexHistoryCompleteThrough
+        case .proxy, .ollamaDesktop, .lmStudioLog: return false
+        }
+    }
+
+    /// `events` must stay sorted ascending by timestamp: `EventRange`,
+    /// `EventMerge`, trim and the today cache all binary-search or prefix-scan it.
+    var eventsAreSorted: Bool {
+        zip(events, events.dropFirst()).allSatisfy { $0.timestamp <= $1.timestamp }
+    }
+
+    /// Debug helper (also used by tools/verify-store.swift): traps if the window is unsorted.
+    func assertSorted(_ context: @autoclosure () -> String = "") {
+        assert(eventsAreSorted, "UsageStore.events is not sorted by timestamp \(context())")
+    }
+
+    /// Blocks until queued persistence writes (journal, history) have hit disk.
+    func flushIO() { ioQueue.sync {} }
 
     func upsertLiveCall(_ st: ResponseScanner.CallState) {
         DispatchQueue.main.async {
@@ -293,16 +481,67 @@ final class UsageStore: ObservableObject {
 
     /// Backfilled day totals from transcripts older than the events window,
     /// produced by the watcher's one-time-per-gap historical scan.
-    func mergeHistorical(_ batch: [String: DayAgg]) {
-        guard !batch.isEmpty else { return }
+    /// `ollamaTwins` are the exact Claude-Code-via-Ollama transcript events inside
+    /// that backfill: they are what journaled proxy records that aged out while the
+    /// app was closed must be shadowed against BEFORE those records fold (order
+    /// matters: the fold max-merges into an existing bucket, the backfill sums).
+    /// `coveredRoots` advance to `coverThrough` in the SAME main-queue block as the
+    /// merge, so no save can persist the backfilled days without their watermark
+    /// (that would double them on the next launch). The merge is ADDITIVE
+    /// (`HistoryFold.mergeAdditive`): a day may already hold another root's data.
+    func mergeHistorical(_ batch: [String: DayAgg], ollamaTwins: [UsageEvent] = [],
+                         coveredRoots: [String] = [], coverThrough: Date? = nil) {
+        guard !batch.isEmpty || !coveredRoots.isEmpty else { return }
         DispatchQueue.main.async {
-            for (k, v) in batch {
-                var d = self.history[k] ?? DayAgg()
-                d.merge(v)
-                self.history[k] = d
-            }
-            FileLog.log("backfilled \(batch.count) days into history")
+            self.foldPendingAged(twins: ollamaTwins)
+            HistoryFold.mergeAdditive(batch, into: &self.history)
+            if let cover = coverThrough { self.advanceRoots(coveredRoots, to: cover) }
+            if !batch.isEmpty { FileLog.log("backfilled \(batch.count) days into history") }
         }
+    }
+
+    /// Sets/advances per-root watermarks (main queue) and recomputes the floor.
+    private func advanceRoots(_ roots: [String], to cover: Date) {
+        for r in roots { rootHistoryCompleteThrough[r] = max(rootHistoryCompleteThrough[r] ?? .distantPast, cover) }
+        recomputeFloor(fallback: max(historyCompleteThrough, cover))
+    }
+
+    private func recomputeFloor(fallback: Date) {
+        historyCompleteThrough = rootHistoryCompleteThrough.values.min() ?? fallback
+    }
+
+    /// Per-root watermarks for the transcript watcher's bootstrap (thread-safe via
+    /// main, like `claudeWatermark`). On the first call after an upgrade from a
+    /// pre-3 history file, every root in `seedLegacy` (those the old shared
+    /// watermark really covered: primary and extras) is seeded with that shared
+    /// watermark and the result is persisted. Roots without an entry (never
+    /// seen, e.g. Cowork, which post-dates schema 2) are absent from the result;
+    /// the caller starts them at `ancient`.
+    func resolveRootWatermarks(roots: [String], seedLegacy: Set<String>) -> [String: Date] {
+        let work = { () -> [String: Date] in
+            if self.legacySeedPending {
+                for r in seedLegacy where self.rootHistoryCompleteThrough[r] == nil {
+                    self.rootHistoryCompleteThrough[r] = self.historyCompleteThrough
+                }
+                self.legacySeedPending = false
+                self.saveHistory()
+            }
+            return self.rootHistoryCompleteThrough
+        }
+        return Thread.isMainThread ? work() : DispatchQueue.main.sync(execute: work)
+    }
+
+    /// Thread-safe read of the Codex watermark. Writers update it on main, so
+    /// reading through main (FIFO) orders a bootstrap after any earlier merge
+    /// and prevents a replay from re-running a backfill that just finished.
+    func claudeWatermark() -> Date {
+        Thread.isMainThread ? historyCompleteThrough
+            : DispatchQueue.main.sync { historyCompleteThrough }
+    }
+
+    func codexWatermark() -> Date {
+        Thread.isMainThread ? codexHistoryCompleteThrough
+            : DispatchQueue.main.sync { codexHistoryCompleteThrough }
     }
 
     /// Codex uses its own watermark because the source log lives outside the
@@ -324,45 +563,34 @@ final class UsageStore: ObservableObject {
     /// bulk-loaded events, shadows persisted proxy events that match a transcript
     /// record of the same call (the live matching above only covers runtime arrivals),
     /// and records how far back history is now complete.
-    func replayFinished(coverThrough: Date) {
+    func replayFinished(coverThrough: Date, roots: [String] = []) {
         DispatchQueue.main.async {
-            self.events.sort { $0.timestamp < $1.timestamp }
-            var byOut: [Int: [Date]] = [:]
-            for e in self.events where e.source == .transcript && e.provider == .ollama
-                && e.tokenAccuracy == .exact {
-                byOut[e.outputTokens, default: []].append(e.timestamp)
+            var evs = self.events
+            evs.sort { $0.timestamp < $1.timestamp }
+            // Proxy-side accuracy is deliberately NOT gated (see shadowProxyTwins):
+            // estimated and legacy-migrated (.unknown) proxy events are exactly the
+            // copies that need shadowing against their exact transcript twins.
+            var changed = EventReconciler.shadowProxyTwins(
+                in: &evs, index: EventReconciler.TranscriptTwinIndex(evs))
+            changed += EventReconciler.shadowDesktopOverlaps(in: &evs)
+            self.events = evs
+            for i in changed {
+                if let key = self.journalKeyByID[evs[i].id] { self.persistShadowFlag(key) }
             }
-            var shadowed = 0
-            // Proxy-side accuracy is deliberately NOT gated here: estimated and
-            // legacy-migrated (.unknown) proxy events are exactly the copies that
-            // need shadowing against their exact transcript twins. The transcript
-            // index above already requires .exact on the authoritative side.
-            for i in self.events.indices where self.events[i].source == .proxy
-                && !self.events[i].shadowed {
-                let e = self.events[i]
-                search: for delta in -2...2 {
-                    if let dates = byOut[e.outputTokens + delta],
-                       dates.contains(where: { abs($0.timeIntervalSince(e.timestamp)) < 120 }) {
-                        self.events[i].shadowed = true
-                        shadowed += 1
-                        break search
-                    }
-                }
+            let shadowed = changed.count
+            // Aged journal records the backfill did not take (no backfill ran).
+            self.foldPendingAged(twins: [])
+            if roots.isEmpty {
+                self.historyCompleteThrough = max(self.historyCompleteThrough, coverThrough)
+            } else {
+                self.advanceRoots(roots, to: coverThrough)
             }
-            for i in self.events.indices where self.events[i].source == .ollamaDesktop
-                && !self.events[i].shadowed {
-                let desktop = self.events[i]
-                if self.events.contains(where: {
-                    $0.source == .proxy && !$0.shadowed
-                        && EventReconciler.desktopAndProxyOverlap(desktop, $0)
-                }) {
-                    self.events[i].shadowed = true
-                    shadowed += 1
-                }
-            }
-            self.historyCompleteThrough = max(self.historyCompleteThrough, coverThrough)
+            self.replayComplete = true
             self.saveHistory()
             FileLog.log("replay complete: \(self.events.count) events in window, \(shadowed) proxy events shadowed, history through \(Self.dayKey(self.historyCompleteThrough))")
+            #if DEBUG
+            self.assertSorted()
+            #endif
         }
     }
 
@@ -389,32 +617,29 @@ final class UsageStore: ObservableObject {
     }
 
     private func trim() {
-        let cutoff = eventsCutoff
-        if let first = events.first, first.timestamp < cutoff {
-            let removed = events.filter { $0.timestamp < cutoff }
-            events.removeAll { $0.timestamp < cutoff }
-            fold(removed, through: cutoff)
-        }
-        if events.count > 60_000 {
-            let removed = Array(events.prefix(events.count - 60_000))
-            events.removeFirst(events.count - 60_000)
-            fold(removed, through: removed.last?.timestamp ?? cutoff)
-        }
+        var w = HistoryFold.Window(
+            events: events, keyIDs: eventIDByDedupKey, history: history,
+            claudeThrough: historyCompleteThrough, codexThrough: codexHistoryCompleteThrough,
+            rootThrough: rootHistoryCompleteThrough)
+        let before = events.count
+        guard before > HistoryFold.overflowCap
+                || (events.first.map { $0.timestamp < eventsCutoff } ?? false) else { return }
+        let r = HistoryFold.trim(&w, cutoff: eventsCutoff, dayKey: Self.dayKey)
+        guard r.folded > 0 else { return }
+        events = w.events
+        eventIDByDedupKey = w.keyIDs
+        history = w.history
+        rootHistoryCompleteThrough = w.rootThrough
+        historyCompleteThrough = w.rootThrough.values.min() ?? w.claudeThrough
+        codexHistoryCompleteThrough = w.codexThrough
+        saveHistory()
+        logMaxMerges(r.conflicts)
+        FileLog.log("folded \(r.folded) aged-out events into daily history")
     }
 
-    /// Events leaving the live window are folded into the persistent daily history
-    /// so the heatmap keeps them after the raw events (and transcripts) are gone.
-    private func fold(_ removed: [UsageEvent], through: Date) {
-        guard !removed.isEmpty else { return }
-        for e in removed where !e.shadowed {
-            let k = Self.dayKey(e.timestamp)
-            var d = history[k] ?? DayAgg()
-            d.add(e)
-            history[k] = d
-        }
-        historyCompleteThrough = max(historyCompleteThrough, through)
-        saveHistory()
-        FileLog.log("folded \(removed.count) aged-out events into daily history")
+    private func logMaxMerges(_ conflicts: [String]) {
+        guard !conflicts.isEmpty else { return }
+        FileLog.log("fold: history already had \(conflicts.count) day/provider bucket(s) (\(conflicts.prefix(6).joined(separator: ", "))); merged by max, not summed")
     }
 
     // MARK: - Persistence (non-replayable local events; transcripts replay from disk)
@@ -424,20 +649,38 @@ final class UsageStore: ObservableObject {
               let f = try? JSONDecoder().decode(HistoryFile.self, from: data) else { return }
         history = f.days
         historyCompleteThrough = Date(timeIntervalSince1970: f.completeThrough)
+        rootHistoryCompleteThrough = (f.rootCompleteThrough ?? [:]).mapValues(Date.init(timeIntervalSince1970:))
+        legacySeedPending = (f.schema ?? 1) < Self.historySchema
+        if !rootHistoryCompleteThrough.isEmpty { recomputeFloor(fallback: historyCompleteThrough) }
         codexHistoryCompleteThrough = f.codexCompleteThrough.map(Date.init(timeIntervalSince1970:))
             ?? Date(timeIntervalSince1970: 0)
-        FileLog.log("loaded daily history: \(f.days.count) days, Claude through \(Self.dayKey(historyCompleteThrough)), Codex through \(Self.dayKey(codexHistoryCompleteThrough))")
+        // One-time repair: pre-v2 history could hold doubled Codex days (fold()
+        // never advanced the Codex watermark, so the next backfill re-added them).
+        // Strip Codex and reset only its watermark; the backfill rebuilds it.
+        if (f.schema ?? 1) < CodexHistory.historySchema {
+            history = CodexHistory.stripCodex(f.days)
+            codexHistoryCompleteThrough = Date(timeIntervalSince1970: 0)
+            FileLog.log("history schema \(f.schema ?? 1) -> \(CodexHistory.historySchema): stripped Codex days, rebuilding from rollout files")
+            saveHistory()
+        }
+        FileLog.log("loaded daily history (schema \(f.schema ?? 1)): \(f.days.count) days, \(rootHistoryCompleteThrough.count) root watermark(s), Claude through \(Self.dayKey(historyCompleteThrough)), Codex through \(Self.dayKey(codexHistoryCompleteThrough))")
     }
 
     private func saveHistory() {
         let f = HistoryFile(
             completeThrough: historyCompleteThrough.timeIntervalSince1970,
             codexCompleteThrough: codexHistoryCompleteThrough.timeIntervalSince1970,
+            schema: legacySeedPending ? CodexHistory.historySchema : Self.historySchema,
+            rootCompleteThrough: rootHistoryCompleteThrough.mapValues { $0.timeIntervalSince1970 },
             days: history)
-        guard let data = try? JSONEncoder().encode(f) else { return }
+        // Deterministic bytes (sorted keys), and no rewrite when nothing changed.
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        guard let data = try? encoder.encode(f) else { return }
         ioQueue.async {
             try? FileManager.default.createDirectory(at: Self.supportDir, withIntermediateDirectories: true)
-            try? data.write(to: Self.historyURL)
+            if let current = try? Data(contentsOf: Self.historyURL), current == data { return }
+            try? data.write(to: Self.historyURL, options: .atomic)
         }
     }
 
@@ -450,32 +693,36 @@ final class UsageStore: ObservableObject {
     }
 
     private func loadV2Events(_ data: Data) {
-        let cutoff = eventsCutoff
         let decoder = JSONDecoder()
         var bestByKey: [String: UsageEvent] = [:]
+        var shadowKeys = Set<String>()
         var start = data.startIndex
         while start < data.endIndex {
             let nl = data[start...].firstIndex(of: 0x0A) ?? data.endIndex
             let line = data[start..<nl]
             start = nl < data.endIndex ? data.index(after: nl) : data.endIndex
-            guard !line.isEmpty,
-                  let record = try? decoder.decode(PersistedLocalEvent.self, from: line),
-                  record.schema == 2, record.event.timestamp > cutoff else { continue }
-            if let existing = bestByKey[record.key] {
-                bestByKey[record.key] = EventReconciler.preferred(existing, record.event)
-            } else {
-                bestByKey[record.key] = record.event
+            guard !line.isEmpty else { continue }
+            if let record = try? decoder.decode(PersistedLocalEvent.self, from: line) {
+                guard record.schema == 2 else { continue }
+                if record.event.shadowed { shadowKeys.insert(record.key) }
+                if let existing = bestByKey[record.key] {
+                    bestByKey[record.key] = EventReconciler.preferred(existing, record.event)
+                } else {
+                    bestByKey[record.key] = record.event
+                }
+            } else if let flag = try? decoder.decode(PersistedShadowFlag.self, from: line),
+                      flag.schema == 2 {
+                shadowKeys.insert(flag.shadowedKey)
             }
         }
-        events = bestByKey.values.sorted { $0.timestamp < $1.timestamp }
-        eventIDByDedupKey = Dictionary(uniqueKeysWithValues: bestByKey.map { ($0.key, $0.value.id) })
-        rewriteLocalEventJournal(bestByKey)
-        FileLog.log("loaded \(events.count) persisted local inference events")
+        // A shadow decision is sticky for the key, whichever record won `preferred`.
+        for key in shadowKeys { bestByKey[key]?.shadowed = true }
+        installJournal(bestByKey)
+        FileLog.log("loaded \(events.count) persisted local inference events (\(pendingAged.count) aged proxy/Desktop records held for twin matching)")
     }
 
     private func migrateLegacyProxyEvents() {
         guard let data = try? Data(contentsOf: Self.proxyEventsURL), !data.isEmpty else { return }
-        let cutoff = eventsCutoff
         let decoder = JSONDecoder()
         var migrated: [String: UsageEvent] = [:]
         var start = data.startIndex
@@ -485,7 +732,6 @@ final class UsageStore: ObservableObject {
             start = nl < data.endIndex ? data.index(after: nl) : data.endIndex
             guard !line.isEmpty, let pe = try? decoder.decode(PersistedProxyEvent.self, from: line) else { continue }
             let timestamp = Date(timeIntervalSince1970: pe.ts)
-            guard timestamp > cutoff else { continue }
             let event = UsageEvent(
                 timestamp: timestamp, provider: .ollama, source: .proxy,
                 model: pe.model, sessionId: "ollama-direct", projectName: nil,
@@ -497,16 +743,88 @@ final class UsageStore: ObservableObject {
             let key = "legacy-proxy:\(pe.ts):\(pe.model):\(pe.input):\(pe.output)"
             migrated[key] = event
         }
-        events = migrated.values.sorted { $0.timestamp < $1.timestamp }
-        eventIDByDedupKey = Dictionary(uniqueKeysWithValues: migrated.map { ($0.key, $0.value.id) })
-        rewriteLocalEventJournal(migrated)
+        installJournal(migrated)
         FileLog.log("migrated \(migrated.count) legacy proxy events to schema v2")
+    }
+
+    /// Turns loaded journal records into the live window.
+    ///
+    /// - `>= cutoff` and not below the Claude watermark: live.
+    /// - At/after the cutoff but below the watermark (an overflow fold advanced it):
+    ///   that day is already in history; dropped, compacted away.
+    /// - Below the cutoff (aged out while closed): LM Studio records fold now.
+    ///   Proxy / Ollama Desktop records are HELD in `pendingAged` until
+    ///   `mergeHistorical`/`replayFinished`, because their Claude-Code-via-Ollama
+    ///   twins only appear in the transcript backfill that runs after this load;
+    ///   folding them first double-counts every twinned call. The journal is not
+    ///   compacted past held records, so quitting before they fold loses nothing.
+    private func installJournal(_ records: [String: UsageEvent]) {
+        let split = HistoryFold.partitionJournal(
+            records, cutoff: eventsCutoff, foldedThrough: historyCompleteThrough)
+        let keyByID = Dictionary(records.map { ($0.value.id, $0.key) }, uniquingKeysWith: { a, _ in a })
+        func isHeld(_ e: UsageEvent) -> Bool { e.source == .proxy || e.source == .ollamaDesktop }
+        let foldNow = split.aged.filter { !isHeld($0) }
+        if !foldNow.isEmpty {
+            let conflicts = HistoryFold.fold(foldNow, into: &history, dayKey: Self.dayKey)
+            saveHistory()
+            logMaxMerges(conflicts)
+            FileLog.log("folded \(foldNow.count) journaled local events that aged out while closed into daily history")
+        }
+        pendingAged = split.aged.filter(isHeld).compactMap { e in keyByID[e.id].map { (key: $0, event: e) } }
+        if split.dropped > 0 {
+            FileLog.log("dropped \(split.dropped) journaled local events already folded into history (day(s) below the watermark)")
+        }
+        events = split.live.values.sorted { $0.timestamp < $1.timestamp }
+        eventIDByDedupKey = Dictionary(uniqueKeysWithValues: split.live.map { ($0.key, $0.value.id) })
+        journalKeyByID = Dictionary(split.live.map { ($0.value.id, $0.key) }, uniquingKeysWith: { a, _ in a })
+        var keep = split.live
+        for held in pendingAged { keep[held.key] = held.event }
+        rewriteLocalEventJournal(keep)
+    }
+
+    /// Shadows the held aged proxy/Desktop records against the backfilled transcript
+    /// twins (same ±2 token / 120 s rule as the live path) and against each other
+    /// (`desktopAndProxyOverlap`), folds the survivors into history, then compacts
+    /// the journal to the live records. Runs on main, once.
+    private func foldPendingAged(twins: [UsageEvent]) {
+        guard !pendingAged.isEmpty else { return }
+        var evs = pendingAged.map(\.event)
+        pendingAged = []
+        let shadowed = EventReconciler.shadowProxyTwins(
+            in: &evs, index: EventReconciler.TranscriptTwinIndex(twins)).count
+            + EventReconciler.shadowDesktopOverlaps(in: &evs).count
+        let conflicts = HistoryFold.fold(evs, into: &history, dayKey: Self.dayKey)
+        saveHistory()
+        logMaxMerges(conflicts)
+        FileLog.log("folded \(evs.count - shadowed) aged proxy/Desktop journal events into daily history (\(shadowed) shadowed as duplicates of transcript/proxy records)")
+        compactJournal()
+    }
+
+    /// Rewrites the journal with only the persisted events still in the window
+    /// (shadow flags folded into the records). Queued after the history save on the
+    /// same serial IO queue.
+    private func compactJournal() {
+        let byID = Dictionary(events.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        var records: [String: UsageEvent] = [:]
+        for (id, key) in journalKeyByID { if let e = byID[id] { records[key] = e } }
+        journalKeyByID = Dictionary(records.map { ($0.value.id, $0.key) }, uniquingKeysWith: { a, _ in a })
+        rewriteLocalEventJournal(records)
+    }
+
+    private func persistShadowFlag(_ key: String) {
+        guard var line = try? JSONEncoder().encode(PersistedShadowFlag(schema: 2, shadowedKey: key)) else { return }
+        line.append(0x0A)
+        appendJournalLine(line)
     }
 
     private func persistLocalEvent(_ event: UsageEvent, key: String) {
         let record = PersistedLocalEvent(schema: 2, key: key, event: event)
         guard var line = try? JSONEncoder().encode(record) else { return }
         line.append(0x0A)
+        appendJournalLine(line)
+    }
+
+    private func appendJournalLine(_ line: Data) {
         ioQueue.async {
             try? FileManager.default.createDirectory(at: Self.supportDir, withIntermediateDirectories: true)
             if let h = try? FileHandle(forWritingTo: Self.localEventsURL) {
@@ -521,27 +839,41 @@ final class UsageStore: ObservableObject {
 
     private func rewriteLocalEventJournal(_ records: [String: UsageEvent]) {
         let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
         var compacted = Data()
-        for (key, event) in records.sorted(by: { $0.value.timestamp < $1.value.timestamp }) {
+        // Timestamp, then key: a stable total order (dictionary order is random per run).
+        for (key, event) in records.sorted(by: {
+            $0.value.timestamp != $1.value.timestamp ? $0.value.timestamp < $1.value.timestamp : $0.key < $1.key
+        }) {
             guard var line = try? encoder.encode(PersistedLocalEvent(schema: 2, key: key, event: event)) else { continue }
             line.append(0x0A)
             compacted.append(line)
         }
         ioQueue.async {
             try? FileManager.default.createDirectory(at: Self.supportDir, withIntermediateDirectories: true)
+            if let current = try? Data(contentsOf: Self.localEventsURL), current == compacted { return }
             try? compacted.write(to: Self.localEventsURL, options: .atomic)
         }
     }
 
     // MARK: - Aggregates
 
+    /// Non-shadowed events in the period. `events` is sorted by timestamp, so the
+    /// window start (and, for today, the day end) is found by binary search and only
+    /// that slice is filtered — not all ~18k events.
     func events(in period: StatsPeriod) -> [UsageEvent] {
         let cal = Calendar.current
-        if period == .today {
-            return events.filter { cal.isDateInToday($0.timestamp) && !$0.shadowed }
+        let dayStart = cal.startOfDay(for: Date())
+        let start = period == .today
+            ? dayStart
+            : (cal.date(byAdding: .day, value: -(period.days - 1), to: dayStart) ?? dayStart)
+        let lo = EventRange.firstIndex(in: events, timestamp: { $0.timestamp }, atOrAfter: start)
+        var hi = events.count
+        if period == .today, let dayEnd = cal.date(byAdding: .day, value: 1, to: dayStart) {
+            hi = EventRange.firstIndex(in: events, timestamp: { $0.timestamp }, atOrAfter: dayEnd)
         }
-        let start = cal.date(byAdding: .day, value: -(period.days - 1), to: cal.startOfDay(for: Date())) ?? Date()
-        return events.filter { $0.timestamp >= start && !$0.shadowed }
+        guard lo < hi else { return [] }
+        return events[lo..<hi].filter { !$0.shadowed }
     }
 
     func totals(for provider: UsageOrigin?, in period: StatsPeriod) -> Totals {
@@ -693,7 +1025,17 @@ final class UsageStore: ObservableObject {
         if let live = liveCalls.last, now.timeIntervalSince(live.lastUpdate) < 8 {
             return "↓\(Fmt.compact(live.outputTokens))"
         }
-        let t = totals(for: nil, in: .today)
-        return Fmt.compact(t.input + t.output)
+        return Fmt.compact(todayTokens)
+    }
+
+    /// Today's input + output, cached per (calendar day, events mutation).
+    private var todayTokens: Int {
+        let dayStart = Calendar.current.startOfDay(for: Date())
+        if let c = todayCache, c.dayStart == dayStart { return c.tokens }
+        var t = Totals()
+        for e in events(in: .today) { t.add(e) }
+        let tokens = t.input + t.output
+        todayCache = (dayStart, tokens)
+        return tokens
     }
 }

@@ -24,8 +24,15 @@ enum Snapshot {
         let limitFixture = snapshotLimits(env["SNAPSHOT_LIMITS"])
 
         let services = AppServices.shared
-        // Let the transcript replay, proxy, and pollers populate the store.
-        RunLoop.main.run(until: Date().addingTimeInterval(8))
+        // Wait for the Claude transcript replay (+ backfill) to finish, bounded by
+        // 30 s, then a short settle for the Codex watcher and pollers. A fixed 8 s
+        // under-waited on a large corpus (first-run Cowork backfill).
+        let deadline = Date().addingTimeInterval(30)
+        while !services.store.replayComplete && Date() < deadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+        }
+        if !services.store.replayComplete { print("snapshot: replay not finished after 30 s; rendering anyway") }
+        RunLoop.main.run(until: Date().addingTimeInterval(1.5))
 
         let view = MenuView(store: services.store, limits: services.limits,
                             openAILimits: services.openAILimits,

@@ -11,7 +11,11 @@ final class OpenAILimitsManager: ObservableObject {
     static let refreshRequested = Notification.Name("TokenScopeCodexLimitsRefreshRequested")
 
     @Published private(set) var windows: [LimitWindow] = []
+    /// Published only when the displayed windows change (assigning on every
+    /// token_count record re-ran the scene). The newest-observation watermark that
+    /// guards against replayed old files lives in the non-published `observedAt`.
     @Published private(set) var lastUpdated: Date?
+    private var observedAt: Date?
     @Published var monitoringEnabled: Bool
     @Published var notificationsEnabled = true
 
@@ -69,9 +73,10 @@ final class OpenAILimitsManager: ObservableObject {
     func observe(primary: ObservedWindow?, secondary: ObservedWindow?, at date: Date) {
         guard monitoringEnabled else { return }
         DispatchQueue.main.async {
-            guard self.lastUpdated == nil || date >= self.lastUpdated! else { return }
+            guard self.observedAt == nil || date >= self.observedAt! else { return }
+            self.observedAt = date
             let candidates = [("primary", primary), ("secondary", secondary)]
-            self.windows = candidates.compactMap { kind, window in
+            let new: [LimitWindow] = candidates.compactMap { kind, window in
                 guard let window else { return nil }
                 let period = Self.duration(window.minutes)
                 // Mirror Claude's "Session · 5h" / "Weekly · 7d" naming (the primary
@@ -84,6 +89,9 @@ final class OpenAILimitsManager: ObservableObject {
                     resetsAt: window.resetsAt,
                     period: period)
             }
+            // Publish only on change (display comparison, not timestamps).
+            guard !LimitWindow.displayEqual(self.windows, new) else { return }
+            self.windows = new
             self.lastUpdated = date
             self.maybeNotify()
         }
