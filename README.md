@@ -10,7 +10,7 @@ service status.
 Token usage and local-runtime activity come from four collector families,
 reconciled automatically:
 
-1. **Claude Code transcripts** (`~/.claude/projects/**/*.jsonl`, plus any `ExtraClaudeProjectDirs` roots for `CLAUDE_CONFIG_DIR` sessions). Every API response
+1. **Claude Code transcripts** (`~/.claude/projects/**/*.jsonl`, Claude Cowork / Desktop agent sessions under `~/Library/Application Support/Claude/local-agent-mode-sessions` when present (opt out with `defaults write com.tokenscope IncludeCoworkSessions -bool false`), plus any `ExtraClaudeProjectDirs` roots for `CLAUDE_CONFIG_DIR` sessions). Every API response
    Claude Code receives is logged there with exact `usage` counts (input, output,
    cache read, cache write), the session ID, and the project directory. TokenScope
    tails these files once a second. This covers native Anthropic usage *and* Claude
